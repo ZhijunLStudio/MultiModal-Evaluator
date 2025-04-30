@@ -1,0 +1,8 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+benchmark
+command.txt
+benchmark_output
