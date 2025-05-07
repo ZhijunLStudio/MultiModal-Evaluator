@@ -40,7 +40,7 @@ class GradingClient:
                 {"role": "user", "content": full_prompt}
             ],
             "temperature": 0.2,  # 评分应该是确定性的，使用较低的温度
-            "max_tokens": 100
+            "max_tokens": 1024,
         }
         
         try:

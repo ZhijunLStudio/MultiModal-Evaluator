@@ -39,7 +39,7 @@ class LlamaFactoryClient:
             async with session.post(f"{self.api_base}/chat/completions", 
                                     headers=headers, 
                                     json=data,
-                                    timeout=60) as response:
+                                    timeout=600) as response:
                 response_json = await response.json()
                 end_time = time.time()
                 

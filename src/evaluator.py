@@ -62,6 +62,7 @@ class Evaluator:
         
         # 构建图片完整路径
         img_path = os.path.join(self.config.image_root_dir, item["img_folder"], item["img"])
+        img_key = f"{item['img_folder']}/{item['img']}"
         
         # 确认文件存在
         if not os.path.exists(img_path):
@@ -147,12 +148,26 @@ class Evaluator:
                 }
                 
                 # 添加到单个图片结果字典中
-                img_key = f"{item['img_folder']}/{item['img']}"
                 if img_key not in self.individual_results:
                     self.individual_results[img_key] = []
                 self.individual_results[img_key].append(result)
                 
                 results.append(result)
+                
+                # 立即保存当前图片的结果，但不打印消息
+                if self.config.save_individual:
+                    # 确保输出目录存在
+                    os.makedirs(self.config.output_dir, exist_ok=True)
+                    
+                    # 生成有效的文件名
+                    safe_img_key = img_key.replace('/', '_').replace('\\', '_')
+                    output_file = os.path.join(self.config.output_dir, f"{safe_img_key}.json")
+                    
+                    with open(output_file, 'w', encoding='utf-8') as f:
+                        json.dump(self.individual_results[img_key], f, ensure_ascii=False, indent=2)
+                    
+                    # 不打印消息，避免干扰进度条
+                    # print(f"已保存图片结果: {img_key}, 分数: {grading_result.get('score', 0)}")
                 
             except Exception as e:
                 import traceback
@@ -165,6 +180,8 @@ class Evaluator:
                 results.append(error_result)
         
         return results
+
+
 
 
     async def run(self) -> None:
@@ -187,26 +204,23 @@ class Evaluator:
             "total_inference_time": 0,
             "total_grading_time": 0,
             "scores": [],
-            "recent_scores": [],  # 最近5个分数
-            "recent_inference_times": [],  # 最近5个推理时间
-            "recent_grading_times": []  # 最近5个评分时间
+            "recent_scores": [],
+            "recent_inference_times": [],
+            "recent_grading_times": []
         }
         
         async with aiohttp.ClientSession() as session:
             # 限制并发数量
             semaphore = asyncio.Semaphore(self.config.num_workers)
             
+            # 计算正确的任务总数
+            total_tasks = len(data) * len(self.config.prompt_keys) * self.config.runs_per_prompt
+            
             # 创建进度条
-            total_tasks = len(data) * len(self.config.prompt_keys)
             progress_bar = tqdm(total=total_tasks, desc="评估进度")
             
             async def process_with_semaphore(item, prompt_key):
                 async with semaphore:
-                    # 处理前的任务状态
-                    pre_successful = stats["successful_samples"]
-                    pre_scores_len = len(stats["scores"])
-                    
-                    # 执行处理
                     results = await self._process_item_with_multiple_runs(session, item, prompt_key)
                     
                     # 更新性能统计
@@ -216,7 +230,7 @@ class Evaluator:
                         if "error" not in result:
                             stats["successful_samples"] += 1
                             
-                            # 收集推理和评分时间
+                            # 收集时间和分数
                             inference_time = result.get("generation", {}).get("latency", 0)
                             grading_time = result.get("grading", {}).get("latency", 0)
                             score = result.get("grading", {}).get("score", 0)
@@ -225,7 +239,7 @@ class Evaluator:
                             stats["total_grading_time"] += grading_time
                             stats["scores"].append(score)
                             
-                            # 保持最近的统计信息（最多5个）
+                            # 保持最近统计
                             stats["recent_inference_times"].append(inference_time)
                             if len(stats["recent_inference_times"]) > 5:
                                 stats["recent_inference_times"].pop(0)
@@ -240,25 +254,16 @@ class Evaluator:
                         else:
                             stats["failed_samples"] += 1
                     
-                    # 计算实时统计数据
+                    # 更新进度条
                     elapsed = time.time() - stats["start_time"]
-                    
-                    # 平均分数
                     avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
                     recent_avg_score = sum(stats["recent_scores"]) / len(stats["recent_scores"]) if stats["recent_scores"] else 0
-                    
-                    # 速率计算
                     samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
-                    
-                    # 平均时间
                     avg_inference = stats["total_inference_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
                     avg_grading = stats["total_grading_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
-                    
-                    # 最近的平均时间
                     recent_avg_inference = sum(stats["recent_inference_times"]) / len(stats["recent_inference_times"]) if stats["recent_inference_times"] else 0
                     recent_avg_grading = sum(stats["recent_grading_times"]) / len(stats["recent_grading_times"]) if stats["recent_grading_times"] else 0
                     
-                    # 更新进度条描述
                     progress_desc = (
                         f"已完成: {stats['total_samples']}/{total_tasks} | "
                         f"总分: {avg_score:.1f} | 最近: {recent_avg_score:.1f} | "
@@ -267,15 +272,17 @@ class Evaluator:
                         f"{samples_per_second:.2f}样本/秒"
                     )
                     progress_bar.set_description(progress_desc)
-                    progress_bar.update(1)
+                    progress_bar.update(len(results))
                     
                     return results
             
-            # 创建所有任务
+            # 关键问题修复：确保创建所有任务并等待它们完成
             tasks = []
             for item in data:
                 for prompt_key in self.config.prompt_keys:
-                    tasks.append(process_with_semaphore(item, prompt_key))
+                    # 每个提示词运行多次
+                    for _ in range(self.config.runs_per_prompt):
+                        tasks.append(process_with_semaphore(item, prompt_key))
             
             # 执行所有任务并收集结果
             all_results = await asyncio.gather(*tasks)
@@ -285,29 +292,7 @@ class Evaluator:
             for result_list in all_results:
                 self.results.extend(result_list)
             
-            # 关闭进度条前显示最终统计
-            final_elapsed = time.time() - stats["start_time"]
-            final_samples_per_second = stats["total_samples"] / final_elapsed if final_elapsed > 0 else 0
-            final_avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
-            
-            progress_bar.set_description(
-                f"完成 | 总时间: {final_elapsed:.1f}秒 | 平均速率: {final_samples_per_second:.2f}样本/秒 | "
-                f"平均得分: {final_avg_score:.1f} | 成功: {stats['successful_samples']} | 失败: {stats['failed_samples']}"
-            )
             progress_bar.close()
-            
-            # 打印详细的性能摘要
-            print("\n--- 性能摘要 ---")
-            print(f"总处理样本数: {stats['total_samples']}")
-            print(f"成功样本数: {stats['successful_samples']}")
-            print(f"失败样本数: {stats['failed_samples']}")
-            print(f"总运行时间: {final_elapsed:.2f}秒")
-            print(f"平均样本处理速率: {final_samples_per_second:.2f}样本/秒")
-            if stats['successful_samples'] > 0:
-                print(f"平均推理时间: {stats['total_inference_time']/stats['successful_samples']:.2f}秒/样本")
-                print(f"平均评分时间: {stats['total_grading_time']/stats['successful_samples']:.2f}秒/样本")
-            if stats["scores"]:
-                print(f"平均得分: {final_avg_score:.2f}/100")
 
     
 
