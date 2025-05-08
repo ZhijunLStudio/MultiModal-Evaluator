@@ -77,7 +77,10 @@ class Evaluator:
         if not os.path.exists(img_path):
             error_result = {
                 "error": f"图片不存在: {img_path}",
-                "item": item,
+                "item": {
+                    "img": item["img"],
+                    "img_folder": item["img_folder"]
+                },
                 "prompt_key": prompt_key,
                 "run_id": 0
             }
@@ -90,7 +93,10 @@ class Evaluator:
         except Exception as e:
             error_result = {
                 "error": str(e),
-                "item": item,
+                "item": {
+                    "img": item["img"],
+                    "img_folder": item["img_folder"]
+                },
                 "prompt_key": prompt_key,
                 "run_id": 0
             }
@@ -136,8 +142,13 @@ class Evaluator:
                 llm_time = time.time() - llm_start
                 
                 if "error" in llm_result:
+                    # 第一段错误处理代码应该放在这里
                     error_result = {
                         "error": f"生成错误: {llm_result.get('error', '')}",
+                        "item": {
+                            "img": item["img"],
+                            "img_folder": item["img_folder"]
+                        },
                         "prompt_key": prompt_key,
                         "run_id": run_id
                     }
@@ -220,9 +231,9 @@ class Evaluator:
                 
             except Exception as e:
                 import traceback
-                error_msg = f"{str(e)}\n{traceback.format_exc()}"
+                # 第二段错误处理代码应该放在这里
                 error_result = {
-                    "error": error_msg,
+                    "error": f"{str(e)}\n{traceback.format_exc()}",
                     "item": {
                         "img": item["img"],
                         "img_folder": item["img_folder"]
@@ -255,6 +266,7 @@ class Evaluator:
                 print(f"保存单独结果出错: {str(e)}")
         
         return results
+
 
 
     async def run(self) -> None:
@@ -429,14 +441,24 @@ class Evaluator:
                 "std_dev": statistics.stdev(all_scores) if len(all_scores) > 1 else 0
             }
             
-            # 简化的错误信息
+            # 简化的错误信息 - 安全处理不同的错误结构
             simplified_errors = []
             for error in self.results_stats["errors"][-20:]:  # 只保留最近20条错误
-                simplified_errors.append({
-                    "img": error["item"]["img"],
-                    "prompt_key": error["prompt_key"],
-                    "error": error["error"][:200]  # 截取错误信息
-                })
+                error_info = {
+                    "prompt_key": error.get("prompt_key", "unknown"),
+                    "error": error.get("error", "")[:200]  # 截取错误信息
+                }
+                
+                # 安全地获取img信息
+                if "item" in error:
+                    if isinstance(error["item"], dict):
+                        error_info["img"] = error["item"].get("img", "unknown")
+                    else:
+                        error_info["img"] = str(error["item"])
+                else:
+                    error_info["img"] = "unknown"
+                    
+                simplified_errors.append(error_info)
             
             # 准备摘要数据
             summary_data = {
@@ -458,6 +480,7 @@ class Evaluator:
         except Exception as e:
             import traceback
             print(f"更新摘要文件出错: {str(e)}\n{traceback.format_exc()}")
+
     
     def save_results(self):
         """最终保存结果 - 现在只需要更新最终摘要"""
