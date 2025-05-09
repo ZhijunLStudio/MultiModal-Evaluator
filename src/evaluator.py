@@ -106,34 +106,14 @@ class Evaluator:
         safe_img_key = img_key.replace('/', '_').replace('\\', '_')
         result_file = os.path.join(self.config.output_dir, f"{safe_img_key}.json")
         
-        # 检查是否有现有结果文件，如果有则加载
-        current_img_results = {}
-        if os.path.exists(result_file):
-            try:
-                with open(result_file, 'r', encoding='utf-8') as f:
-                    current_img_results = json.load(f)
-            except Exception:
-                # 如果文件损坏，创建新的
-                current_img_results = {}
-        
-        # 如果是新文件，添加基本信息
-        if not current_img_results:
-            current_img_results = {
-                "image": {
-                    "path": img_key,
-                    "file": item["img"],
-                    "folder": item["img_folder"],
-                    "tag": item.get("tag", "")
-                },
-                "reference": item["answer"],
-                "results": {}
-            }
-        
-        # 如果这个prompt_key还没有结果，初始化它
-        if prompt_key not in current_img_results["results"]:
-            current_img_results["results"][prompt_key] = []
+        # 创建文件锁
+        if not hasattr(self, 'file_locks'):
+            self.file_locks = {}
+        if result_file not in self.file_locks:
+            self.file_locks[result_file] = asyncio.Lock()
         
         # 执行多次运行
+        run_results = []
         for run_id in range(self.config.runs_per_prompt):
             try:
                 # 调用LLaMA Factory API
@@ -142,7 +122,7 @@ class Evaluator:
                 llm_time = time.time() - llm_start
                 
                 if "error" in llm_result:
-                    # 第一段错误处理代码应该放在这里
+                    # 错误处理
                     error_result = {
                         "error": f"生成错误: {llm_result.get('error', '')}",
                         "item": {
@@ -155,8 +135,8 @@ class Evaluator:
                     results.append(error_result)
                     self.results_stats["errors"].append(error_result)
                     
-                    # 添加到当前图片的错误结果中
-                    current_img_results["results"][prompt_key].append({
+                    # 添加到运行结果
+                    run_results.append({
                         "run_id": run_id,
                         "error": llm_result.get('error', ''),
                         "timestamp": time.time()
@@ -218,8 +198,8 @@ class Evaluator:
                     "timestamp": time.time()
                 }
                 
-                # 添加到当前图片的结果中
-                current_img_results["results"][prompt_key].append(simplified_result)
+                # 添加到运行结果
+                run_results.append(simplified_result)
                 
                 # 添加到内部结果列表
                 results.append(full_result)
@@ -231,7 +211,7 @@ class Evaluator:
                 
             except Exception as e:
                 import traceback
-                # 第二段错误处理代码应该放在这里
+                # 错误处理
                 error_result = {
                     "error": f"{str(e)}\n{traceback.format_exc()}",
                     "item": {
@@ -244,26 +224,58 @@ class Evaluator:
                 results.append(error_result)
                 self.results_stats["errors"].append(error_result)
                 
-                # 添加到当前图片的错误结果中
-                current_img_results["results"][prompt_key].append({
+                # 添加到运行结果
+                run_results.append({
                     "run_id": run_id,
                     "error": str(e),
                     "timestamp": time.time()
                 })
         
-        # 立即保存单个图片的结果
+        # 使用同步锁保存单个图片的结果，确保不会覆盖其他prompt的结果
         if self.config.save_individual:
             try:
                 # 确保输出目录存在
                 os.makedirs(self.config.output_dir, exist_ok=True)
                 
-                # 添加最后更新时间
-                current_img_results["last_updated"] = time.time()
-                
-                with open(result_file, 'w', encoding='utf-8') as f:
-                    json.dump(current_img_results, f, ensure_ascii=False, indent=2)
+                # 使用锁获取访问权
+                async with self.file_locks[result_file]:
+                    # 读取最新的文件内容
+                    current_img_results = {}
+                    if os.path.exists(result_file):
+                        try:
+                            with open(result_file, 'r', encoding='utf-8') as f:
+                                current_img_results = json.load(f)
+                        except Exception:
+                            # 如果文件损坏，创建新的
+                            current_img_results = {}
+                    
+                    # 如果是新文件，添加基本信息
+                    if not current_img_results:
+                        current_img_results = {
+                            "image": {
+                                "path": img_key,
+                                "file": item["img"],
+                                "folder": item["img_folder"],
+                                "tag": item.get("tag", "")
+                            },
+                            "reference": item["answer"],
+                            "results": {}
+                        }
+                    
+                    # 确保结果字段存在
+                    if "results" not in current_img_results:
+                        current_img_results["results"] = {}
+                        
+                    # 添加当前prompt的结果，保留其他prompt的已有结果
+                    current_img_results["results"][prompt_key] = run_results
+                    current_img_results["last_updated"] = time.time()
+                    
+                    # 保存完整结果
+                    with open(result_file, 'w', encoding='utf-8') as f:
+                        json.dump(current_img_results, f, ensure_ascii=False, indent=2)
             except Exception as e:
-                print(f"保存单独结果出错: {str(e)}")
+                import traceback
+                print(f"保存单独结果出错: {str(e)}\n{traceback.format_exc()}")
         
         return results
 
