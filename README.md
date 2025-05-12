@@ -1,6 +1,6 @@
 # MultiModal-Evaluator
 
-一个强大的多模态模型评测工具，专注于评估视觉-语言模型(VLM)在图像理解任务上的性能。该工具支持使用多种提示词异步并行处理大量图像样本，通过LLM自动评分，并提供详细的性能分析报告。
+多模态模型评测工具，专注于评估视觉-语言模型(VLM)在图像理解任务上的性能。该工具支持使用多种提示词异步并行处理大量图像样本，通过LLM自动评分，并提供详细的性能分析报告。支持本地模型和远程API调用两种模式。
 
 ## 🌟 主要功能
 
@@ -9,6 +9,7 @@
 -   📊 **自动评分**: 使用大语言模型自动评估生成回答的质量
 -   📈 **详细分析**: 提供分数分布、统计数据和按提示词分类的性能报告
 -   💾 **灵活输出**: 保存每张图片的单独评测结果和综合分析报告
+-   🔌 **双模式支持**: 支持本地模型调用和远程API调用两种模式
 
 ## 📋 数据准备
 
@@ -58,49 +59,91 @@
 
 ## 🚀 使用方法
 
-### 基本用法
+### 本地模型模式
+
+使用本地模型（通过LLaMA Factory API）进行评估:
 
 ```bash
-python evaluator.py \
-  --jsonl path/to/data.jsonl \
-  --image-root path/to/images \
-  --prompts path/to/prompts.json \
-  --output-dir results/my_evaluation \
+python main.py \
+  --jsonl data/benchmark.jsonl \
+  --image-root images/ \
+  --prompts prompts.json \
+  --output-dir results/local_evaluation \
+  --model-mode local \
+  --llama-api http://0.0.0.0:37000/v1 \
+  --llama-key your-api-key \
+  --llama-model Qwen/Qwen2.5-VL-72B-Instruct \
   --prompt-keys prompt1 prompt2 \
+  --temperature 0.2 \
+  --workers 4 \
   --grading-lang zh
 ```
 
-### 高级参数
-
+### 远程API模式
+使用远程API（如OpenAI API）进行评估:
 ```bash
-python evaluator.py \
-  --jsonl path/to/data.jsonl \
-  --image-root path/to/images \
-  --prompts path/to/prompts.json \
-  --output-dir results/my_evaluation \
-  --summary-name final_report.json \
-  --llama-api http://your-api-endpoint/v1 \
-  --llama-key your-api-key \
-  --llama-model your-model-name \
-  --grading-api https://grading-api-endpoint \
-  --grading-key grading-api-key \
-  --grading-model grading-model-name \
-  --temperature 0.5 \
-  --top-p 0.9 \
-  --max-tokens 2048 \
-  --samples 100 \
+python main.py \
+  --jsonl data/benchmark.jsonl \
+  --image-root images/ \
+  --prompts prompts.json \
+  --output-dir results/remote_evaluation \
+  --model-mode remote \
+  --remote-api https://api.openai.com/v1 \
+  --remote-key your-openai-api-key \
+  --remote-model o4-mini \
+  --prompt-keys prompt1 \
   --workers 4 \
-  --runs 3 \
-  --prompt-keys prompt1 prompt2 \
-  --grading-lang zh \
-  --no-individual
+  --no-remote-params \
+  --grading-lang zh
 ```
 
-## 📝 To-Do 列表
+### 完整参数列表
+```bash
+python main.py \
+  --jsonl path/to/data.jsonl \         # JSONL数据文件路径
+  --image-root path/to/images \        # 图片根目录
+  --prompts path/to/prompts.json \     # 提示词JSON文件
+  --output-dir results/my_evaluation \ # 输出结果目录
+  --summary-name final_report.json \   # 摘要文件名称
+  
+  # 模型模式选择
+  --model-mode [local|remote] \        # 模型模式: local=本地模型, remote=远程API
+  
+  # 本地模型参数 (model_mode=local时使用)
+  --llama-api http://your-api/v1 \     # LLaMA Factory API基础URL
+  --llama-key your-api-key \           # LLaMA Factory API密钥
+  --llama-model model-name \           # 模型名称
+  
+  # 远程API参数 (model_mode=remote时使用)
+  --remote-api https://api.example.com/v1 \ # 远程API基础URL
+  --remote-key your-remote-api-key \        # 远程API密钥
+  --remote-model model-name \                # 远程模型名称
+  --no-remote-params \                       # 不向远程API发送生成参数
+  
+  # 评分API参数
+  --grading-api https://grading-api \  # 评分API基础URL
+  --grading-key grading-api-key \      # 评分API密钥
+  --grading-model grading-model \      # 评分模型名称
+  
+  # 生成参数
+  --temperature 0.5 \                  # 温度参数
+  --top-p 0.9 \                        # Top-p采样参数
+  --top-k 50 \                         # Top-k采样参数
+  --max-tokens 2048 \                  # 最大生成token数
+  
+  # 评估配置
+  --samples 100 \                      # 评估样本数量
+  --workers 4 \                        # 并发工作线程数
+  --runs 3 \                           # 每个提示词运行次数
+  --prompt-keys prompt1 prompt2 \      # 要使用的提示词列表
+  --grading-lang [en|zh] \             # 评分提示词语言
+  --no-individual                      # 不保存单独结果文件
+```
 
+📝 To-Do 列表
+- [x] 支持远程API模型调用（如OpenAI API）
 - [ ] 添加更多评分策略支持
 - [ ] 实现可视化分析结果的网页界面
-- [ ] 支持更多模型API格式
 - [ ] 添加评分结果的人工验证工具
 - [ ] 实现基准数据集对比功能
 - [ ] 支持批处理模式以提高API效率
