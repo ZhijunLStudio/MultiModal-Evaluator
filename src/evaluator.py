@@ -203,7 +203,12 @@ class Evaluator:
                         "grading": grade_time,
                         "total": llm_time + grade_time
                     },
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "token_usage": {
+                        "prompt_tokens": llm_result.get("usage", {}).get("prompt_tokens", 0),
+                        "completion_tokens": llm_result.get("usage", {}).get("completion_tokens", 0),
+                        "total_tokens": llm_result.get("usage", {}).get("total_tokens", 0)
+                    }
                 }
                 
                 # Add to run results
@@ -487,6 +492,12 @@ class Evaluator:
                     "score_distribution": score_distribution,
                     "prompt_stats": prompt_stats,
                     "recent_errors": simplified_errors
+                },
+                "performance": {
+                    "average_tokens_per_request": sum(r.get("usage", {}).get("total_tokens", 0) for r in self.results) / len(self.results) if self.results else 0,
+                    "total_tokens_used": sum(r.get("usage", {}).get("total_tokens", 0) for r in self.results),
+                    "average_latency": sum(r.get("total_processing_time", 0) for r in self.results) / len(self.results) if self.results else 0,
+                    "total_processing_time": sum(r.get("total_processing_time", 0) for r in self.results),
                 },
                 "timestamp": time.time()
             }

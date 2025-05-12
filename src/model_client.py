@@ -127,9 +127,6 @@ class RemoteModelClient(ModelClient):
                 data["top_k"] = self.config.top_k
         
         try:
-            # Add debug logging
-            print(f"Sending request to: {self.config.remote_api_base}/chat/completions")
-            print(f"Request data: {data}")
             
             async with session.post(f"{self.config.remote_api_base}/chat/completions", 
                                     headers=headers, 
