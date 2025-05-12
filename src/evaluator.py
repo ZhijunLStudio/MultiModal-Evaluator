@@ -9,49 +9,57 @@ from tqdm import tqdm
 from dataclasses import asdict
 from src.config import Config
 from src.image_processor import ImageProcessor
-from src.llama_factory_client import LlamaFactoryClient
+from src.model_client import LocalModelClient, RemoteModelClient
 from src.grading_client import GradingClient
 
 class Evaluator:
     def __init__(self, config: Config):
         self.config = config
         self.prompts = self._load_prompts()
-        self.llama_client = LlamaFactoryClient(config)
+        
+        # Initialize the appropriate model client based on configuration
+        if config.model_mode == "local":
+            self.model_client = LocalModelClient(config)
+        elif config.model_mode == "remote":
+            self.model_client = RemoteModelClient(config)
+        else:
+            raise ValueError(f"Invalid model mode: {config.model_mode}. Must be 'local' or 'remote'")
+            
         self.grading_client = GradingClient(config)
         self.grading_client.prompts = self.prompts
-        self.results_stats = {  # 只保存统计信息，不保存完整结果
+        self.results_stats = {  # Only save statistics, not full results
             "total_samples": 0,
             "successful_samples": 0,
             "failed_samples": 0,
             "scores_by_prompt": {},
             "errors": []
         }
-        self.individual_results = {}  # 临时存储单个图片的结果
-        self.results = []  # 完整保留所有结果
+        self.individual_results = {}  # Temporary storage for individual image results
+        self.results = []  # Keep all results
         
-        # 验证并设置要使用的prompt keys
+        # Validate and set prompt keys to use
         if not self.config.prompt_keys:
             self.config.prompt_keys = [k for k in self.prompts.keys() 
                                       if not k.startswith("grading_prompt")]
         else:
             for key in self.config.prompt_keys:
                 if key not in self.prompts:
-                    raise ValueError(f"指定的prompt key '{key}'不存在")
+                    raise ValueError(f"Specified prompt key '{key}' does not exist")
                 
-        # 为每个prompt初始化统计数据
+        # Initialize statistics for each prompt
         for key in self.config.prompt_keys:
             self.results_stats["scores_by_prompt"][key] = []
     
     def _load_prompts(self) -> Dict[str, str]:
-        """加载提示词"""
+        """Load prompts from file"""
         try:
             with open(self.config.prompt_path, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except Exception as e:
-            raise Exception(f"加载提示词失败: {str(e)}")
+            raise Exception(f"Failed to load prompts: {str(e)}")
     
     def _load_jsonl(self) -> List[Dict[str, Any]]:
-        """加载JSONL数据"""
+        """Load JSONL data"""
         data = []
         try:
             with open(self.config.jsonl_path, 'r', encoding='utf-8') as f:
@@ -63,20 +71,20 @@ class Evaluator:
                 return data[:self.config.eval_samples]
             return data
         except Exception as e:
-            raise Exception(f"加载JSONL数据失败: {str(e)}")
+            raise Exception(f"Failed to load JSONL data: {str(e)}")
     
     async def _process_item_with_multiple_runs(self, session, item: Dict[str, Any], prompt_key: str) -> List[Dict[str, Any]]:
-        """对单个数据项使用指定prompt运行多次"""
+        """Process a single item with the specified prompt multiple times"""
         results = []
         
-        # 构建图片完整路径
+        # Build complete image path
         img_path = os.path.join(self.config.image_root_dir, item["img_folder"], item["img"])
         img_key = f"{item['img_folder']}/{item['img']}"
         
-        # 确认文件存在
+        # Check if file exists
         if not os.path.exists(img_path):
             error_result = {
-                "error": f"图片不存在: {img_path}",
+                "error": f"Image does not exist: {img_path}",
                 "item": {
                     "img": item["img"],
                     "img_folder": item["img_folder"]
@@ -86,7 +94,7 @@ class Evaluator:
             }
             return [error_result]
         
-        # 编码图片 (只需要做一次)
+        # Encode image (only need to do this once)
         try:
             image_base64 = ImageProcessor.encode_image(img_path)
             generation_prompt = self.prompts[prompt_key]
@@ -102,29 +110,29 @@ class Evaluator:
             }
             return [error_result]
         
-        # 初始化当前图片的结果（如果不存在）
+        # Initialize result for current image (if it doesn't exist)
         safe_img_key = img_key.replace('/', '_').replace('\\', '_')
         result_file = os.path.join(self.config.output_dir, f"{safe_img_key}.json")
         
-        # 创建文件锁
+        # Create file lock
         if not hasattr(self, 'file_locks'):
             self.file_locks = {}
         if result_file not in self.file_locks:
             self.file_locks[result_file] = asyncio.Lock()
         
-        # 执行多次运行
+        # Execute multiple runs
         run_results = []
         for run_id in range(self.config.runs_per_prompt):
             try:
-                # 调用LLaMA Factory API
+                # Call model API
                 llm_start = time.time()
-                llm_result = await self.llama_client.generate(session, generation_prompt, image_base64)
+                llm_result = await self.model_client.generate(session, generation_prompt, image_base64)
                 llm_time = time.time() - llm_start
                 
                 if "error" in llm_result:
-                    # 错误处理
+                    # Error handling
                     error_result = {
-                        "error": f"生成错误: {llm_result.get('error', '')}",
+                        "error": f"Generation error: {llm_result.get('error', '')}",
                         "item": {
                             "img": item["img"],
                             "img_folder": item["img_folder"]
@@ -135,7 +143,7 @@ class Evaluator:
                     results.append(error_result)
                     self.results_stats["errors"].append(error_result)
                     
-                    # 添加到运行结果
+                    # Add to run results
                     run_results.append({
                         "run_id": run_id,
                         "error": llm_result.get('error', ''),
@@ -143,7 +151,7 @@ class Evaluator:
                     })
                     continue
                 
-                # 调用评分API
+                # Call grading API
                 grade_start = time.time()
                 grading_result = await self.grading_client.grade(
                     session,
@@ -153,13 +161,13 @@ class Evaluator:
                 )
                 grade_time = time.time() - grade_start
                 
-                # 确保结果包含延迟时间
+                # Ensure results include latency time
                 if "latency" not in llm_result:
                     llm_result["latency"] = llm_time
                 if "latency" not in grading_result:
                     grading_result["latency"] = grade_time
                 
-                # 整合结果 - 保留内部使用的完整格式
+                # Integrate results - keep full format for internal use
                 full_result = {
                     "item": {
                         "img": item["img"],
@@ -184,7 +192,7 @@ class Evaluator:
                     "total_processing_time": llm_time + grade_time
                 }
                 
-                # 为JSON文件创建简化版本的结果
+                # Create simplified version of results for JSON file
                 simplified_result = {
                     "run_id": run_id,
                     "generation": llm_result["content"],
@@ -198,20 +206,20 @@ class Evaluator:
                     "timestamp": time.time()
                 }
                 
-                # 添加到运行结果
+                # Add to run results
                 run_results.append(simplified_result)
                 
-                # 添加到内部结果列表
+                # Add to internal results list
                 results.append(full_result)
                 self.results.append(full_result)
                 
-                # 更新统计信息
+                # Update statistics
                 score = grading_result.get("score", 0)
                 self.results_stats["scores_by_prompt"][prompt_key].append(score)
                 
             except Exception as e:
                 import traceback
-                # 错误处理
+                # Error handling
                 error_result = {
                     "error": f"{str(e)}\n{traceback.format_exc()}",
                     "item": {
@@ -224,32 +232,32 @@ class Evaluator:
                 results.append(error_result)
                 self.results_stats["errors"].append(error_result)
                 
-                # 添加到运行结果
+                # Add to run results
                 run_results.append({
                     "run_id": run_id,
                     "error": str(e),
                     "timestamp": time.time()
                 })
         
-        # 使用同步锁保存单个图片的结果，确保不会覆盖其他prompt的结果
+        # Use synchronization lock to save individual image results, ensuring we don't overwrite results from other prompts
         if self.config.save_individual:
             try:
-                # 确保输出目录存在
+                # Ensure output directory exists
                 os.makedirs(self.config.output_dir, exist_ok=True)
                 
-                # 使用锁获取访问权
+                # Use lock to get access
                 async with self.file_locks[result_file]:
-                    # 读取最新的文件内容
+                    # Read the latest file content
                     current_img_results = {}
                     if os.path.exists(result_file):
                         try:
                             with open(result_file, 'r', encoding='utf-8') as f:
                                 current_img_results = json.load(f)
                         except Exception:
-                            # 如果文件损坏，创建新的
+                            # If file is corrupted, create a new one
                             current_img_results = {}
                     
-                    # 如果是新文件，添加基本信息
+                    # If it's a new file, add basic information
                     if not current_img_results:
                         current_img_results = {
                             "image": {
@@ -262,37 +270,36 @@ class Evaluator:
                             "results": {}
                         }
                     
-                    # 确保结果字段存在
+                    # Ensure results field exists
                     if "results" not in current_img_results:
                         current_img_results["results"] = {}
                         
-                    # 添加当前prompt的结果，保留其他prompt的已有结果
+                    # Add results for current prompt, preserving existing results for other prompts
                     current_img_results["results"][prompt_key] = run_results
                     current_img_results["last_updated"] = time.time()
                     
-                    # 保存完整结果
+                    # Save complete results
                     with open(result_file, 'w', encoding='utf-8') as f:
                         json.dump(current_img_results, f, ensure_ascii=False, indent=2)
             except Exception as e:
                 import traceback
-                print(f"保存单独结果出错: {str(e)}\n{traceback.format_exc()}")
+                print(f"Error saving individual results: {str(e)}\n{traceback.format_exc()}")
         
         return results
 
-
-
     async def run(self) -> None:
-        """运行评估 - 按顺序处理样本"""
+        """Run evaluation - process samples sequentially"""
         data = self._load_jsonl()
-        print(f"已加载 {len(data)} 条数据进行评估")
-        print(f"将使用以下prompt keys: {self.config.prompt_keys}")
-        print(f"每个prompt将运行 {self.config.runs_per_prompt} 次")
+        print(f"Loaded {len(data)} items for evaluation")
+        print(f"Using these prompt keys: {self.config.prompt_keys}")
+        print(f"Each prompt will run {self.config.runs_per_prompt} times")
+        print(f"Using model mode: {self.config.model_mode}")
         
-        # 如果需要保存单独的结果，确保输出目录存在
+        # If individual results need to be saved, ensure output directory exists
         if self.config.save_individual and not os.path.exists(self.config.output_dir):
             os.makedirs(self.config.output_dir, exist_ok=True)
         
-        # 初始化性能统计字典
+        # Initialize performance statistics dictionary
         stats = {
             "start_time": time.time(),
             "total_samples": 0,
@@ -306,28 +313,28 @@ class Evaluator:
             "recent_grading_times": []
         }
         
-        # 计算总任务数
+        # Calculate total tasks
         total_tasks = len(data) * len(self.config.prompt_keys) * self.config.runs_per_prompt
         
-        # 创建进度条
-        progress_bar = tqdm(total=total_tasks, desc="评估进度")
+        # Create progress bar
+        progress_bar = tqdm(total=total_tasks, desc="Evaluation Progress")
         
         async with aiohttp.ClientSession() as session:
-            # 限制并发数量
+            # Limit concurrency
             semaphore = asyncio.Semaphore(self.config.num_workers)
             
-            # 定期更新摘要的标志
+            # Flag for periodic summary updates
             last_summary_time = time.time()
-            summary_interval = 300  # 每5分钟更新一次摘要
+            summary_interval = 300  # Update summary every 5 minutes
             
-            # 按顺序处理每个样本
+            # Process each sample sequentially
             for i, item in enumerate(data):
-                # 在这一层可以并发处理不同的prompt
+                # At this level we can process different prompts concurrently
                 async def process_prompt(prompt_key):
                     async with semaphore:
                         results = await self._process_item_with_multiple_runs(session, item, prompt_key)
                         
-                        # 更新性能统计
+                        # Update performance statistics
                         for result in results:
                             stats["total_samples"] += 1
                             
@@ -335,7 +342,7 @@ class Evaluator:
                                 stats["successful_samples"] += 1
                                 self.results_stats["successful_samples"] += 1
                                 
-                                # 收集时间和分数
+                                # Collect times and scores
                                 inference_time = result.get("generation", {}).get("latency", 0)
                                 grading_time = result.get("grading", {}).get("latency", 0)
                                 score = result.get("grading", {}).get("score", 0)
@@ -344,7 +351,7 @@ class Evaluator:
                                 stats["total_grading_time"] += grading_time
                                 stats["scores"].append(score)
                                 
-                                # 保持最近统计
+                                # Keep recent statistics
                                 stats["recent_inference_times"].append(inference_time)
                                 if len(stats["recent_inference_times"]) > 5:
                                     stats["recent_inference_times"].pop(0)
@@ -360,7 +367,7 @@ class Evaluator:
                                 stats["failed_samples"] += 1
                                 self.results_stats["failed_samples"] += 1
                         
-                        # 更新进度条
+                        # Update progress bar
                         elapsed = time.time() - stats["start_time"]
                         avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
                         recent_avg_score = sum(stats["recent_scores"]) / len(stats["recent_scores"]) if stats["recent_scores"] else 0
@@ -371,46 +378,46 @@ class Evaluator:
                         recent_avg_grading = sum(stats["recent_grading_times"]) / len(stats["recent_grading_times"]) if stats["recent_grading_times"] else 0
                         
                         progress_desc = (
-                            f"已完成: {stats['total_samples']}/{total_tasks} | "
-                            f"总分: {avg_score:.1f} | 最近: {recent_avg_score:.1f} | "
-                            f"推理: {avg_inference:.1f}s/最近{recent_avg_inference:.1f}s | "
-                            f"评分: {avg_grading:.1f}s/最近{recent_avg_grading:.1f}s | "
-                            f"{samples_per_second:.2f}样本/秒"
+                            f"Completed: {stats['total_samples']}/{total_tasks} | "
+                            f"Avg Score: {avg_score:.1f} | Recent: {recent_avg_score:.1f} | "
+                            f"Inference: {avg_inference:.1f}s/recent{recent_avg_inference:.1f}s | "
+                            f"Grading: {avg_grading:.1f}s/recent{recent_avg_grading:.1f}s | "
+                            f"{samples_per_second:.2f} samples/sec"
                         )
                         progress_bar.set_description(progress_desc)
                         progress_bar.update(len(results))
                         
                         return results
                 
-                # 为每个prompt创建任务
+                # Create tasks for each prompt
                 prompt_tasks = [process_prompt(prompt_key) for prompt_key in self.config.prompt_keys]
                 
-                # 并发执行当前样本的所有prompt任务
+                # Run all prompt tasks for the current sample concurrently
                 await asyncio.gather(*prompt_tasks)
                 
-                # 定期更新摘要文件
+                # Periodically update summary file
                 current_time = time.time()
                 if current_time - last_summary_time > summary_interval:
                     self._update_summary()
                     last_summary_time = current_time
                     
-                # 每10个样本执行一次强制垃圾回收
+                # Force garbage collection every 10 samples
                 if i % 10 == 0:
                     import gc
                     gc.collect()
             
             progress_bar.close()
             
-        # 最后一次更新摘要
+        # Final summary update
         self._update_summary()
 
     def _update_summary(self):
-        """更新摘要文件，只保存关键统计信息"""
+        """Update summary file, saving only key statistics"""
         try:
-            # 确保输出目录存在
+            # Ensure output directory exists
             os.makedirs(self.config.output_dir, exist_ok=True)
             
-            # 计算各提示词的统计信息
+            # Calculate statistics for each prompt
             prompt_stats = {}
             for prompt_key, scores in self.results_stats["scores_by_prompt"].items():
                 if scores:
@@ -423,12 +430,12 @@ class Evaluator:
                         "std_dev": statistics.stdev(scores) if len(scores) > 1 else 0
                     }
             
-            # 计算总体统计
+            # Calculate overall statistics
             all_scores = []
             for scores in self.results_stats["scores_by_prompt"].values():
                 all_scores.extend(scores)
                 
-            # 分数分布
+            # Score distribution
             bins = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"]
             score_distribution = {bin_range: 0 for bin_range in bins}
             
@@ -440,12 +447,12 @@ class Evaluator:
                         score_distribution[bin_range] += 1
                         break
                         
-            # 总体统计信息
+            # Overall statistics
             stats = {
                 "total_samples": self.results_stats["successful_samples"] + self.results_stats["failed_samples"],
                 "valid_samples": self.results_stats["successful_samples"],
                 "error_samples": self.results_stats["failed_samples"],
-                "unique_images": 0,  # 这个值需要单独计算
+                "unique_images": 0,  # This value needs to be calculated separately
                 "average_score": statistics.mean(all_scores) if all_scores else 0,
                 "median_score": statistics.median(all_scores) if all_scores else 0,
                 "min_score": min(all_scores) if all_scores else 0,
@@ -453,15 +460,15 @@ class Evaluator:
                 "std_dev": statistics.stdev(all_scores) if len(all_scores) > 1 else 0
             }
             
-            # 简化的错误信息 - 安全处理不同的错误结构
+            # Simplified error information - safely handle different error structures
             simplified_errors = []
-            for error in self.results_stats["errors"][-20:]:  # 只保留最近20条错误
+            for error in self.results_stats["errors"][-20:]:  # Only keep the most recent 20 errors
                 error_info = {
                     "prompt_key": error.get("prompt_key", "unknown"),
-                    "error": error.get("error", "")[:200]  # 截取错误信息
+                    "error": error.get("error", "")[:200]  # Truncate error message
                 }
                 
-                # 安全地获取img信息
+                # Safely get image information
                 if "item" in error:
                     if isinstance(error["item"], dict):
                         error_info["img"] = error["item"].get("img", "unknown")
@@ -472,9 +479,9 @@ class Evaluator:
                     
                 simplified_errors.append(error_info)
             
-            # 准备摘要数据
+            # Prepare summary data
             summary_data = {
-                "config": {k: v for k, v in asdict(self.config).items() if k != 'grading_api_key'},  # 排除敏感信息
+                "config": {k: v for k, v in asdict(self.config).items() if k != 'grading_api_key'},  # Exclude sensitive information
                 "analysis": {
                     "stats": stats,
                     "score_distribution": score_distribution,
@@ -484,42 +491,41 @@ class Evaluator:
                 "timestamp": time.time()
             }
             
-            # 保存摘要文件
+            # Save summary file
             summary_path = os.path.join(self.config.output_dir, self.config.summary_name)
             with open(summary_path, 'w', encoding='utf-8') as f:
                 json.dump(summary_data, f, ensure_ascii=False, indent=2)
                 
         except Exception as e:
             import traceback
-            print(f"更新摘要文件出错: {str(e)}\n{traceback.format_exc()}")
-
+            print(f"Error updating summary file: {str(e)}\n{traceback.format_exc()}")
     
     def save_results(self):
-        """最终保存结果 - 现在只需要更新最终摘要"""
+        """Final results saving - now only updates final summary"""
         self._update_summary()
         
-        # 计算实际保存的文件数量
+        # Calculate actual number of saved files
         saved_files = 0
         if os.path.exists(self.config.output_dir):
             saved_files = len([f for f in os.listdir(self.config.output_dir) 
                              if f.endswith('.json') and f != self.config.summary_name])
         
-        print(f"总结果已保存至: {os.path.join(self.config.output_dir, self.config.summary_name)}")
-        print(f"已保存 {saved_files} 个单独的图片结果到 {self.config.output_dir} 目录")
+        print(f"Summary results saved to: {os.path.join(self.config.output_dir, self.config.summary_name)}")
+        print(f"Saved {saved_files} individual image results to {self.config.output_dir} directory")
         
-        # 分析摘要并打印
+        # Analyze summary and print
         all_scores = []
         for scores in self.results_stats["scores_by_prompt"].values():
             all_scores.extend(scores)
             
         if self.config.verbose and all_scores:
-            print("\n=== 评估结果摘要 ===")
-            print(f"总样本数: {self.results_stats['successful_samples'] + self.results_stats['failed_samples']}")
-            print(f"有效样本数: {self.results_stats['successful_samples']}")
-            print(f"错误样本数: {self.results_stats['failed_samples']}")
-            print(f"总平均分: {statistics.mean(all_scores):.2f}")
+            print("\n=== Evaluation Results Summary ===")
+            print(f"Total samples: {self.results_stats['successful_samples'] + self.results_stats['failed_samples']}")
+            print(f"Valid samples: {self.results_stats['successful_samples']}")
+            print(f"Error samples: {self.results_stats['failed_samples']}")
+            print(f"Overall average score: {statistics.mean(all_scores):.2f}")
             
-            # 分数分布
+            # Score distribution
             bins = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"]
             score_distribution = {bin_range: 0 for bin_range in bins}
             
@@ -531,12 +537,12 @@ class Evaluator:
                         score_distribution[bin_range] += 1
                         break
             
-            print("\n分数分布:")
+            print("\nScore distribution:")
             for range_key, count in score_distribution.items():
-                print(f"{range_key}: {count} 样本")
+                print(f"{range_key}: {count} samples")
             
-            print("\n按提示词统计:")
+            print("\nStatistics by prompt:")
             for prompt_key, scores in self.results_stats["scores_by_prompt"].items():
                 if scores:
                     avg_score = statistics.mean(scores)
-                    print(f"{prompt_key}: 平均分 {avg_score:.2f} ({len(scores)} 样本)")
+                    print(f"{prompt_key}: Average score {avg_score:.2f} ({len(scores)} samples)")

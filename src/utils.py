@@ -1,39 +1,56 @@
 import argparse
+import time
+import statistics
+import os
 from src.config import Config
 
 def parse_args():
-    """解析命令行参数"""
-    parser = argparse.ArgumentParser(description="多次运行的图连接关系评估工具")
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description="Multi-run image relationship evaluation tool")
     
-    parser.add_argument("--jsonl", type=str, required=True, help="JSONL数据文件路径")
-    parser.add_argument("--image-root", type=str, required=True, help="图片根目录")
-    parser.add_argument("--prompts", type=str, required=True, help="提示词JSON文件路径")
-    parser.add_argument("--output-dir", type=str, required=True, help="输出目录（存放所有结果）")
-    parser.add_argument("--summary-name", type=str, default="summary.json", help="总结果文件名")
+    parser.add_argument("--jsonl", type=str, required=True, help="JSONL data file path")
+    parser.add_argument("--image-root", type=str, required=True, help="Root directory for images")
+    parser.add_argument("--prompts", type=str, required=True, help="Prompts JSON file path")
+    parser.add_argument("--output-dir", type=str, required=True, help="Output directory for all results")
+    parser.add_argument("--summary-name", type=str, default="summary.json", help="Name of summary result file")
     
-    parser.add_argument("--llama-api", type=str, default="http://0.0.0.0:37000/v1", help="LLaMA Factory API基础URL")
-    parser.add_argument("--llama-key", type=str, default="111", help="LLaMA Factory API密钥")
-    parser.add_argument("--llama-model", type=str, default="Qwen2-VL-7B-Instruct", help="LLaMA Factory模型名称")
+    # Model mode selection
+    parser.add_argument("--model-mode", type=str, choices=["local", "remote"], default="local", 
+                        help="Model API mode: local (LLaMA Factory) or remote (OpenAI-compatible)")
     
-    parser.add_argument("--grading-api", type=str, default="grading-api", help="评分API基础URL")
-    parser.add_argument("--grading-key", type=str, default="grading-key", help="评分API密钥")
-    parser.add_argument("--grading-model", type=str, default="deepseek-v3-241226", help="评分模型名称")
+    # Local model parameters
+    parser.add_argument("--llama-api", type=str, default="http://0.0.0.0:37000/v1", help="LLaMA Factory API base URL")
+    parser.add_argument("--llama-key", type=str, default="111", help="LLaMA Factory API key")
+    parser.add_argument("--llama-model", type=str, default="Qwen2-VL-7B-Instruct", help="LLaMA Factory model name")
     
-    parser.add_argument("--temperature", type=float, default=0.7, help="生成温度")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p采样参数")
-    parser.add_argument("--top-k", type=int, default=50, help="Top-k采样参数")
-    parser.add_argument("--max-tokens", type=int, default=1024, help="最大生成token数")
+    # Remote model parameters
+    parser.add_argument("--remote-api", type=str, default="https://api.openai.com/v1", help="Remote API base URL")
+    parser.add_argument("--remote-key", type=str, default="your-api-key", help="Remote API key")
+    parser.add_argument("--remote-model", type=str, default="o4-mini", help="Remote model name")
+    parser.add_argument("--no-remote-params", action="store_true", help="Don't send generation parameters to remote API")
     
-    parser.add_argument("--samples", type=int, default=-1, help="评估样本数量，-1表示全部")
-    parser.add_argument("--workers", type=int, default=2, help="并发工作线程数")
-    parser.add_argument("--prompt-keys", type=str, nargs="+", help="要使用的prompt keys列表")
-    parser.add_argument("--runs", type=int, default=1, help="每个prompt运行的次数")
-    parser.add_argument("--grading-lang", type=str, choices=["en", "zh"], default="en", help="评分提示语言 (en=英文, zh=中文)")
-    parser.add_argument("--no-individual", action="store_true", help="不保存单独的图片结果文件")
+    # Grading parameters
+    parser.add_argument("--grading-api", type=str, default="grading-api", help="Grading API base URL")
+    parser.add_argument("--grading-key", type=str, default="grading-key", help="Grading API key")
+    parser.add_argument("--grading-model", type=str, default="deepseek-v3-241226", help="Grading model name")
+    
+    # Generation parameters
+    parser.add_argument("--temperature", type=float, default=0.7, help="Generation temperature")
+    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling parameter")
+    parser.add_argument("--top-k", type=int, default=50, help="Top-k sampling parameter")
+    parser.add_argument("--max-tokens", type=int, default=1024, help="Maximum tokens to generate")
+    
+    # Evaluation parameters
+    parser.add_argument("--samples", type=int, default=-1, help="Number of samples to evaluate, -1 means all")
+    parser.add_argument("--workers", type=int, default=2, help="Number of concurrent workers")
+    parser.add_argument("--prompt-keys", type=str, nargs="+", help="List of prompt keys to use")
+    parser.add_argument("--runs", type=int, default=1, help="Number of runs per prompt")
+    parser.add_argument("--grading-lang", type=str, choices=["en", "zh"], default="en", help="Grading prompt language (en=English, zh=Chinese)")
+    parser.add_argument("--no-individual", action="store_true", help="Don't save individual image result files")
     
     args = parser.parse_args()
     
-    # 如果未指定输出目录，使用默认值
+    # If output directory not specified, use default
     if not args.output_dir:
         output_name = os.path.splitext(os.path.basename(args.output))[0]
         args.output_dir = f"{output_name}_individual"
@@ -41,7 +58,7 @@ def parse_args():
     return args
 
 def create_config_from_args(args):
-    """从命令行参数创建配置对象"""
+    """Create configuration object from command line arguments"""
     config = Config(
         jsonl_path=args.jsonl,
         image_root_dir=args.image_root,
@@ -49,9 +66,16 @@ def create_config_from_args(args):
         output_dir=args.output_dir,
         summary_name=args.summary_name,
         
+        model_mode=args.model_mode,
+        
         llama_api_base=args.llama_api,
         llama_api_key=args.llama_key,
         llama_model=args.llama_model,
+        
+        remote_api_base=args.remote_api,
+        remote_api_key=args.remote_key,
+        remote_model=args.remote_model,
+        remote_use_params=not args.no_remote_params,
         
         grading_api_base=args.grading_api,
         grading_api_key=args.grading_key,
@@ -74,58 +98,58 @@ def create_config_from_args(args):
 
 
 def print_performance_dashboard(stats, config):
-    """打印详细的性能监控仪表盘"""
+    """Print detailed performance monitoring dashboard"""
     print("\n" + "="*50)
-    print(" "*15 + "性能监控仪表盘")
+    print(" "*15 + "Performance Monitoring Dashboard")
     print("="*50)
     
     elapsed = time.time() - stats["start_time"]
     requests_per_second = stats["total_samples_processed"] / elapsed if elapsed > 0 else 0
     
-    print(f"运行时间: {elapsed:.2f}秒 | 并发数: {config.num_workers}")
-    print(f"总处理样本: {stats['total_samples_processed']} | 速率: {requests_per_second:.2f}样本/秒")
-    print(f"成功样本: {stats['successful_samples']} | 失败样本: {stats['failed_samples']}")
-    print(f"成功率: {(stats['successful_samples']/stats['total_samples_processed']*100):.1f}%" if stats['total_samples_processed'] > 0 else "成功率: N/A")
+    print(f"Runtime: {elapsed:.2f}s | Concurrency: {config.num_workers}")
+    print(f"Total samples processed: {stats['total_samples_processed']} | Rate: {requests_per_second:.2f} samples/sec")
+    print(f"Successful samples: {stats['successful_samples']} | Failed samples: {stats['failed_samples']}")
+    print(f"Success rate: {(stats['successful_samples']/stats['total_samples_processed']*100):.1f}%" if stats['total_samples_processed'] > 0 else "Success rate: N/A")
     
-    print("\n性能分析:")
-    print(f"平均推理时间: {stats['total_inference_time']/stats['successful_samples']:.2f}秒" if stats['successful_samples'] > 0 else "平均推理时间: N/A")
-    print(f"平均评分时间: {stats['total_grading_time']/stats['successful_samples']:.2f}秒" if stats['successful_samples'] > 0 else "平均评分时间: N/A")
-    print(f"推理时间占比: {(stats['total_inference_time']/(stats['total_inference_time']+stats['total_grading_time'])*100):.1f}%" if (stats['total_inference_time']+stats['total_grading_time']) > 0 else "推理时间占比: N/A")
+    print("\nPerformance analysis:")
+    print(f"Average inference time: {stats['total_inference_time']/stats['successful_samples']:.2f}s" if stats['successful_samples'] > 0 else "Average inference time: N/A")
+    print(f"Average grading time: {stats['total_grading_time']/stats['successful_samples']:.2f}s" if stats['successful_samples'] > 0 else "Average grading time: N/A")
+    print(f"Inference time ratio: {(stats['total_inference_time']/(stats['total_inference_time']+stats['total_grading_time'])*100):.1f}%" if (stats['total_inference_time']+stats['total_grading_time']) > 0 else "Inference time ratio: N/A")
     
     if stats["scores"]:
-        print(f"\n评分统计:")
-        print(f"平均分数: {statistics.mean(stats['scores']):.2f}")
-        print(f"最高分数: {max(stats['scores']):.2f}")
-        print(f"最低分数: {min(stats['scores']):.2f}")
+        print(f"\nScore statistics:")
+        print(f"Average score: {statistics.mean(stats['scores']):.2f}")
+        print(f"Maximum score: {max(stats['scores']):.2f}")
+        print(f"Minimum score: {min(stats['scores']):.2f}")
         if len(stats["scores"]) > 1:
-            print(f"分数标准差: {statistics.stdev(stats['scores']):.2f}")
+            print(f"Score standard deviation: {statistics.stdev(stats['scores']):.2f}")
     
     print("="*50)
 
 
 def analyze_bottlenecks(evaluator):
-    """分析并打印性能瓶颈"""
-    print("\n性能瓶颈分析:")
+    """Analyze and print performance bottlenecks"""
+    print("\nPerformance Bottleneck Analysis:")
     
-    # 计算总延迟时间百分比
+    # Calculate total latency time percentages
     inference_time = sum(r["generation"]["latency"] for r in evaluator.results if "generation" in r and "latency" in r["generation"])
     grading_time = sum(r["grading"]["latency"] for r in evaluator.results if "grading" in r and "latency" in r["grading"])
     total_time = inference_time + grading_time
     
     if total_time > 0:
-        print(f"推理API占用时间: {inference_time:.2f}秒 ({inference_time/total_time*100:.1f}%)")
-        print(f"评分API占用时间: {grading_time:.2f}秒 ({grading_time/total_time*100:.1f}%)")
+        print(f"Inference API time: {inference_time:.2f}s ({inference_time/total_time*100:.1f}%)")
+        print(f"Grading API time: {grading_time:.2f}s ({grading_time/total_time*100:.1f}%)")
         
-        # 确定瓶颈
+        # Determine bottlenecks
         if inference_time > grading_time * 1.5:
-            print("主要瓶颈: 推理API - 考虑使用更快的模型或增加并发请求")
+            print("Main bottleneck: Inference API - Consider using a faster model or increasing concurrent requests")
         elif grading_time > inference_time * 1.5:
-            print("主要瓶颈: 评分API - 考虑使用更快的评分模型或优化评分提示")
+            print("Main bottleneck: Grading API - Consider using a faster grading model or optimizing grading prompts")
         else:
-            print("两个API的性能相近，同时优化两者可能获得更好效果")
+            print("Both APIs have similar performance, optimizing both may yield better results")
         
-        # 推荐并发数
+        # Recommend concurrency
         avg_request_time = total_time / len(evaluator.results) if evaluator.results else 0
         if avg_request_time > 0:
             recommended_workers = min(100, max(2, int(5 / avg_request_time)))
-            print(f"建议并发数: {recommended_workers} (基于平均请求时间: {avg_request_time:.2f}秒)")
+            print(f"Recommended workers: {recommended_workers} (based on average request time: {avg_request_time:.2f}s)")
