@@ -67,7 +67,7 @@
 python main.py \
   --jsonl data/benchmark.jsonl \
   --image-root images/ \
-  --prompts prompts.json \
+  --prompts config/prompts.json \
   --output-dir results/local_evaluation \
   --model-mode local \
   --llama-api http://0.0.0.0:37000/v1 \
@@ -85,7 +85,7 @@ python main.py \
 python main.py \
   --jsonl data/benchmark.jsonl \
   --image-root images/ \
-  --prompts prompts.json \
+  --prompts config/prompts.json \
   --output-dir results/remote_evaluation \
   --model-mode remote \
   --remote-api https://api.openai.com/v1 \
