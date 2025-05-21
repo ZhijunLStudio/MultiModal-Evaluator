@@ -36,6 +36,7 @@ class Evaluator:
         }
         self.individual_results = {}  # Temporary storage for individual image results
         self.results = []  # Keep all results
+        self.file_locks = {}  # Initialize file locks dictionary
         
         # Validate and set prompt keys to use
         if not self.config.prompt_keys:
@@ -110,18 +111,10 @@ class Evaluator:
             }
             return [error_result]
         
-        # Initialize result for current image (if it doesn't exist)
-        safe_img_key = img_key.replace('/', '_').replace('\\', '_')
-        result_file = os.path.join(self.config.output_dir, f"{safe_img_key}.json")
-        
-        # Create file lock
-        if not hasattr(self, 'file_locks'):
-            self.file_locks = {}
-        if result_file not in self.file_locks:
-            self.file_locks[result_file] = asyncio.Lock()
-        
         # Execute multiple runs
         run_results = []
+        scores = []  # 收集所有运行的分数
+        
         for run_id in range(self.config.runs_per_prompt):
             try:
                 # Call model API
@@ -167,6 +160,10 @@ class Evaluator:
                 if "latency" not in grading_result:
                     grading_result["latency"] = grade_time
                 
+                # Get score and add to scores list
+                score = grading_result.get("score", 0)
+                scores.append(score)
+                
                 # Integrate results - keep full format for internal use
                 full_result = {
                     "item": {
@@ -183,7 +180,7 @@ class Evaluator:
                     },
                     "grading": {
                         "content": grading_result.get("content", ""),
-                        "score": grading_result.get("score", 0),
+                        "score": score,
                         "usage": grading_result.get("usage", {}),
                         "latency": grading_result.get("latency", grade_time)
                     },
@@ -196,7 +193,7 @@ class Evaluator:
                 simplified_result = {
                     "run_id": run_id,
                     "generation": llm_result["content"],
-                    "score": grading_result.get("score", 0),
+                    "score": score,
                     "grading_feedback": grading_result.get("content", ""),
                     "latency": {
                         "generation": llm_time,
@@ -219,7 +216,6 @@ class Evaluator:
                 self.results.append(full_result)
                 
                 # Update statistics
-                score = grading_result.get("score", 0)
                 self.results_stats["scores_by_prompt"][prompt_key].append(score)
                 
             except Exception as e:
@@ -250,7 +246,18 @@ class Evaluator:
                 # Ensure output directory exists
                 os.makedirs(self.config.output_dir, exist_ok=True)
                 
+                # 创建包含所有分数的字符串，例如: "scores_75_80_90"
+                scores_str = "_".join([f"{s:.0f}" for s in scores]) if scores else "0"
+                scores_filename_part = f"scores_{scores_str}"
+                
+                # 创建文件名
+                safe_img_key = img_key.replace('/', '_').replace('\\', '_')
+                result_file = os.path.join(self.config.output_dir, f"{safe_img_key}_{prompt_key}_{scores_filename_part}.json")
+                
                 # Use lock to get access
+                if result_file not in self.file_locks:
+                    self.file_locks[result_file] = asyncio.Lock()
+                
                 async with self.file_locks[result_file]:
                     # Read the latest file content
                     current_img_results = {}
@@ -269,7 +276,8 @@ class Evaluator:
                                 "path": img_key,
                                 "file": item["img"],
                                 "folder": item["img_folder"],
-                                "tag": item.get("tag", "")
+                                "tag": item.get("tag", ""),
+                                "scores": scores  # 添加所有分数
                             },
                             "reference": item["answer"],
                             "results": {}
@@ -494,8 +502,8 @@ class Evaluator:
                     "recent_errors": simplified_errors
                 },
                 "performance": {
-                    "average_tokens_per_request": sum(r.get("usage", {}).get("total_tokens", 0) for r in self.results) / len(self.results) if self.results else 0,
-                    "total_tokens_used": sum(r.get("usage", {}).get("total_tokens", 0) for r in self.results),
+                    "average_tokens_per_request": sum(r.get("generation", {}).get("usage", {}).get("total_tokens", 0) for r in self.results) / len(self.results) if self.results else 0,
+                    "total_tokens_used": sum(r.get("generation", {}).get("usage", {}).get("total_tokens", 0) for r in self.results),
                     "average_latency": sum(r.get("total_processing_time", 0) for r in self.results) / len(self.results) if self.results else 0,
                     "total_processing_time": sum(r.get("total_processing_time", 0) for r in self.results),
                 },
