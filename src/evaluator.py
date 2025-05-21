@@ -251,8 +251,9 @@ class Evaluator:
                 scores_filename_part = f"scores_{scores_str}"
                 
                 # 创建文件名
-                safe_img_key = img_key.replace('/', '_').replace('\\', '_')
-                result_file = os.path.join(self.config.output_dir, f"{safe_img_key}_{prompt_key}_{scores_filename_part}.json")
+                img_name = item["img"]  # 只使用图像文件名，不包含文件夹
+                result_file = os.path.join(self.config.output_dir, f"{img_name}_{prompt_key}_{scores_filename_part}.json")
+
                 
                 # Use lock to get access
                 if result_file not in self.file_locks:
