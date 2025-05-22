@@ -36,13 +36,7 @@ class GradingClient:
         for src, tgt in matches:
             connections.append((src.strip(), "<->", tgt.strip()))
         
-        if not connections:
-            # 添加调试信息
-            print(f"Warning: No connections extracted from text. Sample: {text[:100]}...")
-        
         return connections
-
-
     
     def _format_connection(self, conn: Tuple[str, str, str]) -> str:
         """Format connection tuple as string"""
@@ -69,7 +63,6 @@ class GradingClient:
         # 计算精确匹配指标
         precision = len(exact_matches) / len(gen_conn_set) if gen_conn_set else 0.0
         recall = len(exact_matches) / len(ref_conn_set) if ref_conn_set else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
         
         # 将结果打包成字典
         result = {
@@ -80,11 +73,159 @@ class GradingClient:
             "total_gen": len(gen_connections),
             "total_ref": len(ref_connections),
             "precision": precision,
-            "recall": recall,
-            "f1": f1
+            "recall": recall
         }
         
         return result
+    
+    def _extract_semantic_matches(self, text: str) -> List[Dict[str, str]]:
+        """Extract semantic matches from grading model output in JSON format"""
+        matches = []
+        
+        # 调试信息
+        if self.config.verbose:
+            print(f"Extracting semantic matches from text: {text[:200]}...")
+        
+        # 1. 尝试从 ```json ... ``` 代码块提取 JSON
+        json_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
+        json_matches = re.findall(json_pattern, text, re.DOTALL)
+        
+        if json_matches:
+            for json_text in json_matches:
+                try:
+                    if self.config.verbose:
+                        print(f"Found JSON text: {json_text[:100]}...")
+                    
+                    data = json.loads(json_text)
+                    
+                    # 检查是否包含 semantic_matches
+                    if "semantic_matches" in data and isinstance(data["semantic_matches"], list):
+                        for match in data["semantic_matches"]:
+                            if isinstance(match, dict) and "generated" in match and "reference" in match:
+                                gen = self._clean_match_string(match["generated"])
+                                ref = self._clean_match_string(match["reference"])
+                                matches.append({"generated": gen, "reference": ref})
+                        
+                        if matches and self.config.verbose:
+                            print(f"Successfully extracted {len(matches)} semantic matches from JSON")
+                        
+                        # 有效匹配后返回，不再尝试其他方法
+                        if matches:
+                            return matches
+                except json.JSONDecodeError as e:
+                    if self.config.verbose:
+                        print(f"JSON decode error: {str(e)}")
+                    continue
+                except Exception as e:
+                    if self.config.verbose:
+                        print(f"Error processing JSON: {str(e)}")
+                    continue
+        
+        # 2. 如果未从代码块提取成功，尝试直接解析整个文本
+        try:
+            if self.config.verbose:
+                print("Trying to parse entire text as JSON")
+            
+            data = json.loads(text)
+            if "semantic_matches" in data and isinstance(data["semantic_matches"], list):
+                for match in data["semantic_matches"]:
+                    if isinstance(match, dict) and "generated" in match and "reference" in match:
+                        gen = self._clean_match_string(match["generated"])
+                        ref = self._clean_match_string(match["reference"])
+                        matches.append({"generated": gen, "reference": ref})
+                
+                if matches and self.config.verbose:
+                    print(f"Successfully extracted {len(matches)} semantic matches from full text")
+                
+                # 有效匹配后返回
+                if matches:
+                    return matches
+        except json.JSONDecodeError:
+            if self.config.verbose:
+                print("Failed to parse entire text as JSON")
+        except Exception as e:
+            if self.config.verbose:
+                print(f"Error processing text as JSON: {str(e)}")
+        
+        # 3. 如果 JSON 解析都失败，回退到正则表达式方法
+        if self.config.verbose:
+            print("Falling back to regex pattern matching")
+        
+        # 主要匹配模式
+        main_pattern = r'Generated:\s*([^=\n]+?)\s*=\s*Reference:\s*([^\n]+)'
+        pairs = re.findall(main_pattern, text, re.IGNORECASE)
+        
+        for gen, ref in pairs:
+            gen_clean = self._clean_match_string(gen)
+            ref_clean = self._clean_match_string(ref)
+            matches.append({"generated": gen_clean, "reference": ref_clean})
+        
+        # 备用匹配模式
+        if not matches:
+            alt_patterns = [
+                r'`([^`]+)`\s*(?:is|are)?\s*equivalent to\s*`([^`]+)`',
+                r'\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|'
+            ]
+            
+            for pattern in alt_patterns:
+                pairs = re.findall(pattern, text, re.IGNORECASE)
+                for gen, ref in pairs:
+                    gen_clean = self._clean_match_string(gen)
+                    ref_clean = self._clean_match_string(ref)
+                    matches.append({"generated": gen_clean, "reference": ref_clean})
+                
+                if matches:  # 找到匹配就停止尝试
+                    break
+        
+        # 4. 去重处理
+        unique_matches = []
+        seen_pairs = set()
+        
+        for match in matches:
+            pair_id = f"{match['generated']}|{match['reference']}"
+            if pair_id not in seen_pairs:
+                seen_pairs.add(pair_id)
+                unique_matches.append(match)
+        
+        if self.config.verbose:
+            print(f"Final extraction result: {len(unique_matches)} unique semantic matches")
+        
+        return unique_matches
+
+    def _clean_match_string(self, text: str) -> str:
+        """Clean match string by removing quotes, asterisks, etc."""
+        # 移除引号、星号和转义字符等
+        cleaned = re.sub(r'[`*"\\]', '', text.strip())
+        # 移除开头结尾的空白字符
+        return cleaned.strip()
+
+
+    
+    def _calculate_metrics(self, exact_matches: int, semantic_matches: int, 
+                          total_gen: int, total_ref: int) -> Dict[str, float]:
+        """Calculate evaluation metrics correctly"""
+        # 确保语义匹配数量不会导致总匹配超过参考数量
+        total_matches = min(exact_matches + semantic_matches, total_ref)
+        
+        # 计算精确率和召回率
+        precision = total_matches / total_gen if total_gen > 0 else 0.0
+        recall = total_matches / total_ref if total_ref > 0 else 0.0
+        
+        # 计算标准AP和mAP
+        # AP是为每个参考连接找到匹配的概率
+        # 在我们的案例中，可以简化为正确匹配的参考连接数量比例
+        ap = recall  # 在这个场景中，AP等同于召回率
+        
+        # 确保所有指标在[0,1]范围内
+        precision = min(1.0, max(0.0, precision))
+        recall = min(1.0, max(0.0, recall))
+        ap = min(1.0, max(0.0, ap))
+        
+        return {
+            "precision": precision,
+            "recall": recall,
+            "map": ap  # 在我们的场景中，mAP就是AP
+        }
     
     async def grade(self, session, prompt: str, generated_answer: str, reference_answer: str) -> Dict[str, Any]:
         """Call grading API to evaluate the generated answer with focus on connection relationships"""
@@ -105,11 +246,17 @@ class GradingClient:
         # 比较连接关系
         comparison = self._compare_connections(gen_connections, ref_connections)
         
+        # 计算初始指标(仅基于精确匹配)
+        initial_metrics = self._calculate_metrics(
+            comparison["exact_match_count"], 0, 
+            comparison["total_gen"], comparison["total_ref"]
+        )
+        
         # 如果没有未匹配的连接，或者参考或生成的连接为空，则不需要进行语义匹配
         if not comparison['unmatched_gen'] or not comparison['unmatched_ref']:
             return {
                 "content": "No semantic matching needed - all connections exactly matched or one set is empty.",
-                "score": 100 if comparison["recall"] == 1.0 else int(comparison["recall"] * 100),
+                "score": int(min(100, initial_metrics["map"] * 100)),
                 "usage": {},
                 "latency": 0,
                 "connection_analysis": {
@@ -118,11 +265,7 @@ class GradingClient:
                     "ref_connections": [self._format_connection(c) for c in ref_connections],
                     "semantic_matches": [],
                     "total_matches": comparison["exact_match_count"],
-                    "metrics": {
-                        "precision": comparison["precision"],
-                        "recall": comparison["recall"],
-                        "f1": comparison["f1"]
-                    }
+                    "metrics": initial_metrics
                 }
             }
         
@@ -192,17 +335,25 @@ class GradingClient:
                 if "choices" in response_json and len(response_json["choices"]) > 0:
                     content = response_json["choices"][0]["message"]["content"]
                     
-                    # 提取语义匹配对
+                    # 提取语义匹配对（已去重）
                     semantic_matches = self._extract_semantic_matches(content)
-                    total_matches = comparison["exact_match_count"] + len(semantic_matches)
                     
-                    # 计算包括语义匹配的指标
-                    sem_precision = total_matches / comparison["total_gen"] if comparison["total_gen"] > 0 else 0
-                    sem_recall = total_matches / comparison["total_ref"] if comparison["total_ref"] > 0 else 0
-                    sem_f1 = 2 * sem_precision * sem_recall / (sem_precision + sem_recall) if (sem_precision + sem_recall) > 0 else 0
+                    # 计算指标（确保不会因为重复计算而超过1）
+                    metrics = self._calculate_metrics(
+                        comparison["exact_match_count"], 
+                        len(semantic_matches),
+                        comparison["total_gen"], 
+                        comparison["total_ref"]
+                    )
                     
-                    # 生成分数 - 基于召回率
-                    score = int(min(100, sem_recall * 100))
+                    # 计算总匹配数（确保不超过参考总数）
+                    total_matches = min(
+                        comparison["exact_match_count"] + len(semantic_matches),
+                        comparison["total_ref"]
+                    )
+                    
+                    # 生成分数 - 基于 mAP
+                    score = int(min(100, metrics["map"] * 100))
                     
                     result = {
                         "content": content,
@@ -215,74 +366,45 @@ class GradingClient:
                             "ref_connections": [self._format_connection(c) for c in ref_connections],
                             "semantic_matches": semantic_matches,
                             "total_matches": total_matches,
-                            "metrics": {
-                                "regex_precision": comparison["precision"],
-                                "regex_recall": comparison["recall"],
-                                "regex_f1": comparison["f1"],
-                                "semantic_precision": sem_precision,
-                                "semantic_recall": sem_recall, 
-                                "semantic_f1": sem_f1
-                            }
+                            "metrics": metrics
                         }
                     }
                     return result
                 else:
+                    # API 错误情况 - 仅使用正则匹配结果
                     return {
                         "error": "Invalid API response", 
                         "content": "", 
-                        "score": int(comparison["recall"] * 100),
+                        "score": int(min(100, initial_metrics["map"] * 100)),
                         "usage": {}, 
                         "latency": end_time - start_time,
                         "connection_analysis": {
                             "comparison": comparison,
-                            "metrics": {
-                                "precision": comparison["precision"],
-                                "recall": comparison["recall"],
-                                "f1": comparison["f1"]
-                            }
+                            "gen_connections": [self._format_connection(c) for c in gen_connections],
+                            "ref_connections": [self._format_connection(c) for c in ref_connections],
+                            "semantic_matches": [],
+                            "total_matches": comparison["exact_match_count"],
+                            "metrics": initial_metrics
                         }
                     }
                 
         except Exception as e:
+            # 异常情况 - 仅使用正则匹配结果
             return {
                 "error": str(e), 
                 "content": "", 
-                "score": int(comparison["recall"] * 100), 
+                "score": int(min(100, initial_metrics["map"] * 100)),
                 "usage": {}, 
                 "latency": time.time() - start_time,
                 "connection_analysis": {
                     "comparison": comparison,
-                    "metrics": {
-                        "precision": comparison["precision"],
-                        "recall": comparison["recall"],
-                        "f1": comparison["f1"]
-                    }
+                    "gen_connections": [self._format_connection(c) for c in gen_connections],
+                    "ref_connections": [self._format_connection(c) for c in ref_connections],
+                    "semantic_matches": [],
+                    "total_matches": comparison["exact_match_count"],
+                    "metrics": initial_metrics
                 }
             }
-    
-    def _extract_semantic_matches(self, text: str) -> List[Dict[str, str]]:
-        """Extract semantic matches from grading model output"""
-        matches = []
-        
-        # 尝试不同的匹配模式
-        patterns = [
-            # 标准格式: Generated: `A -> B` = Reference: `X -> Y`
-            r'Generated:\s*`([^`]+)`\s*=\s*Reference:\s*`([^`]+)`',
-            # 替代格式: `A -> B` is equivalent to `X -> Y`
-            r'`([^`]+)`\s*(?:is|are)?\s*equivalent to\s*`([^`]+)`',
-            # 表格形式: | `A -> B` | `X -> Y` |
-            r'\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|'
-        ]
-        
-        for pattern in patterns:
-            pairs = re.findall(pattern, text, re.IGNORECASE)
-            for gen, ref in pairs:
-                matches.append({
-                    "generated": gen.strip(),
-                    "reference": ref.strip()
-                })
-        
-        return matches
     
     def _extract_score(self, text: str) -> float:
         """Extract score from grading text"""

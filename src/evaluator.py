@@ -113,7 +113,7 @@ class Evaluator:
         
         # Execute multiple runs
         run_results = []
-        scores = []  # 收集所有运行的分数
+        map_scores = []  # 收集所有运行的MAP分数
         
         for run_id in range(self.config.runs_per_prompt):
             try:
@@ -160,9 +160,10 @@ class Evaluator:
                 if "latency" not in grading_result:
                     grading_result["latency"] = grade_time
                 
-                # Get score and add to scores list
+                # Get score and add to map scores list
                 score = grading_result.get("score", 0)
-                scores.append(score)
+                map_score = grading_result.get("connection_analysis", {}).get("metrics", {}).get("map", 0)
+                map_scores.append(map_score)
                 
                 # Integrate results - keep full format for internal use
                 full_result = {
@@ -204,18 +205,14 @@ class Evaluator:
                             "total_ref": 0,
                             "total_gen": 0,
                             "precision": 0,
-                            "recall": 0,
-                            "f1": 0
+                            "recall": 0
                         },
                         "semantic_matches": [],
                         "total_matches": 0,
                         "metrics": {
-                            "regex_precision": 0,
-                            "regex_recall": 0,
-                            "regex_f1": 0,
-                            "semantic_precision": 0,
-                            "semantic_recall": 0,
-                            "semantic_f1": 0
+                            "precision": 0,
+                            "recall": 0,
+                            "map": 0
                         }
                     }),
                     "latency": {
@@ -269,13 +266,13 @@ class Evaluator:
                 # Ensure output directory exists
                 os.makedirs(self.config.output_dir, exist_ok=True)
                 
-                # 创建包含所有分数的字符串，例如: "scores_75_80_90"
-                scores_str = "_".join([f"{s:.0f}" for s in scores]) if scores else "0"
-                scores_filename_part = f"scores_{scores_str}"
+                # 创建包含所有MAP分数的字符串
+                map_str = "_".join([f"{int(s*100)}" for s in map_scores]) if map_scores else "0"
+                map_filename_part = f"map_{map_str}"
                 
                 # 创建文件名
                 img_name = item["img"]  # 只使用图像文件名，不包含文件夹
-                result_file = os.path.join(self.config.output_dir, f"{img_name}_{prompt_key}_{scores_filename_part}.json")
+                result_file = os.path.join(self.config.output_dir, f"{img_name}_{prompt_key}_{map_filename_part}.json")
 
                 
                 # Use lock to get access
@@ -301,7 +298,7 @@ class Evaluator:
                                 "file": item["img"],
                                 "folder": item["img_folder"],
                                 "tag": item.get("tag", ""),
-                                "scores": scores  # 添加所有分数
+                                "map_scores": map_scores  # 存储MAP分数而非原始分数
                             },
                             "reference": item["answer"],
                             "results": {}
@@ -323,6 +320,7 @@ class Evaluator:
                 print(f"Error saving individual results: {str(e)}\n{traceback.format_exc()}")
         
         return results
+
 
 
     async def run(self) -> None:
