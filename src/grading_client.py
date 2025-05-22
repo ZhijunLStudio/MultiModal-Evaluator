@@ -24,9 +24,8 @@ class GradingClient:
         for src, tgt in matches:
             connections.append((src.strip(), "->", tgt.strip()))
         
-        # 提取形式为 A - B 或 A — B 的连接 (包括多种连字符)
-        # 注意：这里添加了Em Dash和其他可能的连字符
-        dash_pattern = re.compile(r'(\w+)\s*[—\-–]\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
+        # 提取形式为 A - B 或 A — B 的连接 (包括多种连字符，且处理可能没有空格的情况)
+        dash_pattern = re.compile(r'(\w+)[^\w\n]*[—\-–−﹣－‐⁃‑‒\u2010-\u2015][^\w\n]*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
         matches = dash_pattern.findall(text)
         for src, tgt in matches:
             connections.append((src.strip(), "-", tgt.strip()))
@@ -37,7 +36,12 @@ class GradingClient:
         for src, tgt in matches:
             connections.append((src.strip(), "<->", tgt.strip()))
         
+        if not connections:
+            # 添加调试信息
+            print(f"Warning: No connections extracted from text. Sample: {text[:100]}...")
+        
         return connections
+
 
     
     def _format_connection(self, conn: Tuple[str, str, str]) -> str:
