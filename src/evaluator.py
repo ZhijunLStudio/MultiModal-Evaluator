@@ -182,7 +182,8 @@ class Evaluator:
                         "content": grading_result.get("content", ""),
                         "score": score,
                         "usage": grading_result.get("usage", {}),
-                        "latency": grading_result.get("latency", grade_time)
+                        "latency": grading_result.get("latency", grade_time),
+                        "connection_analysis": grading_result.get("connection_analysis", {})
                     },
                     "reference": item["answer"],
                     "timestamp": time.time(),
@@ -195,6 +196,28 @@ class Evaluator:
                     "generation": llm_result["content"],
                     "score": score,
                     "grading_feedback": grading_result.get("content", ""),
+                    "connection_analysis": grading_result.get("connection_analysis", {
+                        "gen_connections": [],
+                        "ref_connections": [],
+                        "comparison": {
+                            "exact_match_count": 0,
+                            "total_ref": 0,
+                            "total_gen": 0,
+                            "precision": 0,
+                            "recall": 0,
+                            "f1": 0
+                        },
+                        "semantic_matches": [],
+                        "total_matches": 0,
+                        "metrics": {
+                            "regex_precision": 0,
+                            "regex_recall": 0,
+                            "regex_f1": 0,
+                            "semantic_precision": 0,
+                            "semantic_recall": 0,
+                            "semantic_f1": 0
+                        }
+                    }),
                     "latency": {
                         "generation": llm_time,
                         "grading": grade_time,
@@ -300,6 +323,7 @@ class Evaluator:
                 print(f"Error saving individual results: {str(e)}\n{traceback.format_exc()}")
         
         return results
+
 
     async def run(self) -> None:
         """Run evaluation - process samples sequentially"""
