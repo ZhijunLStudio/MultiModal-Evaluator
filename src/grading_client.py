@@ -25,16 +25,25 @@ class GradingClient:
         for src, tgt in arrow_matches:
             connections.append((src.strip(), "->", tgt.strip()))
         
-        # 2. 提取双连字符(--) 和 单连字符 (-)
-        # 注意：这个模式现在匹配 -- 和 -，并且不要求连字符周围有空格
-        dash_pattern = re.compile(r'(\w+)\s*(?:-{1,2}|[—\-–−﹣－‐⁃‑‒\u2010-\u2015]+)\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        dash_matches = dash_pattern.findall(text)
-        for src, tgt in dash_matches:
-            # 检查这不是已经匹配为箭头的连接
-            if not any(src.strip() == a_src and tgt.strip() == a_tgt for a_src, a_tgt in arrow_matches):
-                connections.append((src.strip(), "-", tgt.strip()))
+        # 2. 提取双连字符连接 (--)，明确保留 -- 符号
+        double_dash_pattern = re.compile(r'(\w+)\s*--\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
+        double_dash_matches = double_dash_pattern.findall(text)
+        for src, tgt in double_dash_matches:
+            connections.append((src.strip(), "--", tgt.strip()))  # 注意：使用 -- 而不是 -
         
-        # 3. 提取双向连接 (<->)
+        # 3. 提取其他连字符连接 (-, —等)
+        # 排除已经匹配的 -- 和 ->
+        other_dash_pattern = re.compile(r'(\w+)\s*[—\-–−﹣－‐⁃‑‒\u2010-\u2015]\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
+        other_dash_matches = other_dash_pattern.findall(text)
+        for src, tgt in other_dash_matches:
+            src = src.strip()
+            tgt = tgt.strip()
+            # 检查这不是已经匹配为箭头或双连字符的连接
+            if not any(src == a_src and tgt == a_tgt for a_src, a_tgt in arrow_matches) and \
+            not any(src == d_src and tgt == d_tgt for d_src, d_tgt in double_dash_matches):
+                connections.append((src, "-", tgt))
+        
+        # 4. 提取双向连接 (<->)
         bidirectional_pattern = re.compile(r'(\w+)\s*<->\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
         bidir_matches = bidirectional_pattern.findall(text)
         for src, tgt in bidir_matches:
@@ -43,10 +52,12 @@ class GradingClient:
         return connections
 
 
+
     
     def _format_connection(self, conn: Tuple[str, str, str]) -> str:
-        """Format connection tuple as string"""
+        """Format connection tuple as string, preserving connection type"""
         return f"{conn[0]} {conn[1]} {conn[2]}"
+
     
     def _compare_connections(self, gen_connections: List[Tuple[str, str, str]], 
                             ref_connections: List[Tuple[str, str, str]]) -> Dict[str, Any]:
@@ -83,6 +94,7 @@ class GradingClient:
         }
         
         return result
+
     
     def _extract_semantic_matches(self, text: str) -> List[Dict[str, str]]:
         """Extract semantic matches from grading model output in JSON format"""
@@ -125,8 +137,6 @@ class GradingClient:
         
         # 2. 如果未从代码块提取成功，尝试直接解析整个文本
         try:
-            if self.config.verbose:
-                print("Trying to parse entire text as JSON")
             
             data = json.loads(text)
             if "semantic_matches" in data and isinstance(data["semantic_matches"], list):
