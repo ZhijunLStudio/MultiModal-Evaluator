@@ -3,6 +3,7 @@ import re
 from typing import Dict, Any, List, Tuple, Set
 import aiohttp
 from src.config import Config
+import json
 
 class GradingClient:
     def __init__(self, config: Config):
@@ -18,25 +19,30 @@ class GradingClient:
         """
         connections = []
         
-        # 提取形式为 A -> B 的连接
+        # 1. 提取箭头连接 (->)
         arrow_pattern = re.compile(r'(\w+)\s*->\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        matches = arrow_pattern.findall(text)
-        for src, tgt in matches:
+        arrow_matches = arrow_pattern.findall(text)
+        for src, tgt in arrow_matches:
             connections.append((src.strip(), "->", tgt.strip()))
         
-        # 提取形式为 A - B 或 A — B 的连接 (包括多种连字符，且处理可能没有空格的情况)
-        dash_pattern = re.compile(r'(\w+)[^\w\n]*[—\-–−﹣－‐⁃‑‒\u2010-\u2015][^\w\n]*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        matches = dash_pattern.findall(text)
-        for src, tgt in matches:
-            connections.append((src.strip(), "-", tgt.strip()))
+        # 2. 提取双连字符(--) 和 单连字符 (-)
+        # 注意：这个模式现在匹配 -- 和 -，并且不要求连字符周围有空格
+        dash_pattern = re.compile(r'(\w+)\s*(?:-{1,2}|[—\-–−﹣－‐⁃‑‒\u2010-\u2015]+)\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
+        dash_matches = dash_pattern.findall(text)
+        for src, tgt in dash_matches:
+            # 检查这不是已经匹配为箭头的连接
+            if not any(src.strip() == a_src and tgt.strip() == a_tgt for a_src, a_tgt in arrow_matches):
+                connections.append((src.strip(), "-", tgt.strip()))
         
-        # 提取形式为 A <-> B 的连接
+        # 3. 提取双向连接 (<->)
         bidirectional_pattern = re.compile(r'(\w+)\s*<->\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        matches = bidirectional_pattern.findall(text)
-        for src, tgt in matches:
+        bidir_matches = bidirectional_pattern.findall(text)
+        for src, tgt in bidir_matches:
             connections.append((src.strip(), "<->", tgt.strip()))
         
         return connections
+
+
     
     def _format_connection(self, conn: Tuple[str, str, str]) -> str:
         """Format connection tuple as string"""
@@ -82,10 +88,6 @@ class GradingClient:
         """Extract semantic matches from grading model output in JSON format"""
         matches = []
         
-        # 调试信息
-        if self.config.verbose:
-            print(f"Extracting semantic matches from text: {text[:200]}...")
-        
         # 1. 尝试从 ```json ... ``` 代码块提取 JSON
         json_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
         json_matches = re.findall(json_pattern, text, re.DOTALL)
@@ -106,8 +108,8 @@ class GradingClient:
                                 ref = self._clean_match_string(match["reference"])
                                 matches.append({"generated": gen, "reference": ref})
                         
-                        if matches and self.config.verbose:
-                            print(f"Successfully extracted {len(matches)} semantic matches from JSON")
+                        # if matches and self.config.verbose:
+                        #     print(f"Successfully extracted {len(matches)} semantic matches from JSON")
                         
                         # 有效匹配后返回，不再尝试其他方法
                         if matches:
@@ -134,8 +136,8 @@ class GradingClient:
                         ref = self._clean_match_string(match["reference"])
                         matches.append({"generated": gen, "reference": ref})
                 
-                if matches and self.config.verbose:
-                    print(f"Successfully extracted {len(matches)} semantic matches from full text")
+                # if matches and self.config.verbose:
+                #     print(f"Successfully extracted {len(matches)} semantic matches from full text")
                 
                 # 有效匹配后返回
                 if matches:
