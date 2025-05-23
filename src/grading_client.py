@@ -15,19 +15,31 @@ class GradingClient:
     
 
 
+    def _extract_node_name(self, node_text: str) -> str:
+        """Extract only the node name part from text that may include attributes."""
+        # 提取节点名称，忽略可能存在的属性标签
+        bracket_index = node_text.find('[')
+        if bracket_index != -1:
+            return node_text[:bracket_index].strip()
+        return node_text.strip()
+
     def _clean_node_names(self, node_name: str) -> str:
         """Clean node names by removing brackets, quotes, etc."""
-        # 移除方括号
-        if isinstance(node_name, str):
-            if node_name.startswith('[') and node_name.endswith(']'):
-                node_name = node_name[1:-1]
-            
-            # 移除引号
-            if (node_name.startswith('"') and node_name.endswith('"')) or \
-            (node_name.startswith("'") and node_name.endswith("'")):
-                node_name = node_name[1:-1]
+        if not isinstance(node_name, str):
+            return str(node_name)
         
-        return node_name.strip() if isinstance(node_name, str) else str(node_name)
+        # 首先提取纯节点名称，去除属性标签
+        clean_name = self._extract_node_name(node_name)
+        
+        # 去除分号和其他潜在的分隔符
+        clean_name = clean_name.rstrip(';').strip()
+        
+        # 移除引号
+        if (clean_name.startswith('"') and clean_name.endswith('"')) or \
+        (clean_name.startswith("'") and clean_name.endswith("'")):
+            clean_name = clean_name[1:-1]
+        
+        return clean_name.strip()
 
     def _extract_connections(self, text: str) -> List[Tuple[str, str, str]]:
         """Extract connection relationships from text using regex.
@@ -35,70 +47,57 @@ class GradingClient:
         """
         connections = []
         
-        # 更灵活的节点模式 - 支持多种节点格式
-        # 匹配: 普通单词(Node1)、带括号节点([Node])、带引号节点("Node")、带连字符节点(Node-1)等
-        node_pattern = r'(?:\[([^\]]+)\]|"([^"]+)"|\'([^\']+)\'|(\w+(?:-\w+)*))'
+        # 按行拆分文本，方便处理
+        lines = text.split('\n')
         
-        # 1. 提取箭头连接 (->)
-        arrow_pattern = re.compile(f'{node_pattern}\s*->\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
-        arrow_matches = re.findall(arrow_pattern, text)
+        for line in lines:
+            # 提取原始连接关系
+            
+            # 1. 提取箭头连接 (->)，使用更精确的模式来匹配节点名称
+            arrow_pattern = re.compile(r'(\w+(?:[-_]\w+)*)\s*->\s*(\w+(?:[-_]\w+)*(?:\[.*?\])?)')
+            arrow_matches = re.findall(arrow_pattern, line)
+            
+            for src, tgt in arrow_matches:
+                # 清理目标节点，移除可能的属性标签
+                clean_tgt = self._extract_node_name(tgt)
+                if src and clean_tgt:  # 确保都不为空
+                    connections.append((src.strip(), "->", clean_tgt.strip()))
+            
+            # 2. 提取双向连接 (<->)
+            bidirectional_pattern = re.compile(r'(\w+(?:[-_]\w+)*)\s*<->\s*(\w+(?:[-_]\w+)*(?:\[.*?\])?)')
+            bidir_matches = re.findall(bidirectional_pattern, line)
+            
+            for src, tgt in bidir_matches:
+                clean_tgt = self._extract_node_name(tgt)
+                if src and clean_tgt:
+                    connections.append((src.strip(), "<->", clean_tgt.strip()))
+            
+            # 3. 提取双连字符连接 (--)
+            double_dash_pattern = re.compile(r'(\w+(?:[-_]\w+)*)\s*--\s*(\w+(?:[-_]\w+)*(?:\[.*?\])?)')
+            double_dash_matches = re.findall(double_dash_pattern, line)
+            
+            for src, tgt in double_dash_matches:
+                clean_tgt = self._extract_node_name(tgt)
+                if src and clean_tgt:
+                    connections.append((src.strip(), "--", clean_tgt.strip()))
         
-        for match in arrow_matches:
-            # 提取源节点和目标节点(每个匹配组都可能包含节点名)
-            src = next((s for s in match[:4] if s), '')
-            tgt = next((s for s in match[4:] if s), '')
-            if src and tgt:  # 确保都不为空
-                connections.append((src.strip(), "->", tgt.strip()))
-        
-        # 2. 提取双向连接 (<->)
-        bidirectional_pattern = re.compile(f'{node_pattern}\s*<->\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
-        bidir_matches = re.findall(bidirectional_pattern, text)
-        
-        for match in bidir_matches:
-            src = next((s for s in match[:4] if s), '')
-            tgt = next((s for s in match[4:] if s), '')
-            if src and tgt:
-                connections.append((src.strip(), "<->", tgt.strip()))
-        
-        # 3. 提取双连字符连接 (--)
-        double_dash_pattern = re.compile(f'{node_pattern}\s*--\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
-        double_dash_matches = re.findall(double_dash_pattern, text)
-        
-        for match in double_dash_matches:
-            src = next((s for s in match[:4] if s), '')
-            tgt = next((s for s in match[4:] if s), '')
-            if src and tgt:
-                connections.append((src.strip(), "--", tgt.strip()))
-        
-        # 4. 提取单连字符连接 (-)，排除已匹配的
-        processed_text = text
-        for pattern in [arrow_pattern, bidirectional_pattern, double_dash_pattern]:
-            for match in re.finditer(pattern, text):
-                # 替换已匹配内容，防止重复匹配
-                start, end = match.span()
-                processed_text = processed_text[:start] + ' ' * (end - start) + processed_text[end:]
-        
-        # 使用修改后的文本查找单连字符连接
-        dash_pattern = re.compile(f'{node_pattern}\s*[—\-–−﹣－‐⁃‑‒\u2010-\u2015]\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
-        dash_matches = re.findall(dash_pattern, processed_text)
-        
-        for match in dash_matches:
-            src = next((s for s in match[:4] if s), '')
-            tgt = next((s for s in match[4:] if s), '')
-            if src and tgt:
-                connections.append((src.strip(), "-", tgt.strip()))
-        
-        # 移除可能的重复连接
+        # 移除重复连接
         unique_connections = []
         seen = set()
         
         for src, conn_type, tgt in connections:
+            # 去除末尾可能的分号
+            src = src.rstrip(';')
+            tgt = tgt.rstrip(';')
+            
             connection_key = f"{src}|{conn_type}|{tgt}"
             if connection_key not in seen:
                 seen.add(connection_key)
                 unique_connections.append((src, conn_type, tgt))
         
         return unique_connections
+
+
 
 
 
@@ -159,8 +158,8 @@ class GradingClient:
         if json_matches:
             for json_text in json_matches:
                 try:
-                    if self.config.verbose:
-                        print(f"Found JSON text: {json_text[:100]}...")
+                    # if self.config.verbose:
+                    #     print(f"Found JSON text: {json_text[:100]}...")
                     
                     data = json.loads(json_text)
                     
