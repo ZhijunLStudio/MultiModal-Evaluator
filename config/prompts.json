@@ -1,4 +1,6 @@
 {
+  "prompt4": "Please extract and structure all connection relationships from this diagram. Begin with 'maingraph' and list all connections using the appropriate symbols:\n- -> for directed connections\n- -- for undirected connections\n- <-> for bidirectional connections\n\nIf a connection has a label, represent it as: Component1 -> Component2[\"label\"=\"label_text\"]",
+  
   "prompt5": "Document this diagram's connectivity using the standard format.",
 
   "prompt6": "Using the standard syntax, map out the nodes, edges, and any subgraph structures from this circuit diagram. Include explicit sections for hierarchy and textual descriptions of simplifications.",
