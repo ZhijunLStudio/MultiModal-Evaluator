@@ -32,8 +32,20 @@ class Evaluator:
             "successful_samples": 0,
             "failed_samples": 0,
             "scores_by_prompt": {},
-            "errors": []
+            "errors": [],
+             # 新增：统计各种指标的累积值
+            "metrics_accumulation": {
+            "precision": 0,
+            "recall": 0,
+            "f1": 0,
+            "conn_ratio": 0,
+            "perfect_match": 0
+            },
+            # 新增：各指标的平均值
+            "metrics_average": {}
         }
+        
+        
         self.individual_results = {}  # Temporary storage for individual image results
         self.results = []  # Keep all results
         self.file_locks = {}  # Initialize file locks dictionary
@@ -179,6 +191,10 @@ class Evaluator:
                     "conn_ratio": conn_ratio,
                     "perfect_match": perfect_match
                 })
+                
+                for key in self.results_stats["metrics_accumulation"].keys():
+                    if key in metrics:
+                        self.results_stats["metrics_accumulation"][key] += metrics[key]
                 
                 # 更新token使用量
                 if "usage" not in grading_result:
@@ -446,24 +462,33 @@ class Evaluator:
                                 self.results_stats["failed_samples"] += 1
                         
                         # Update progress bar
-                        elapsed = time.time() - stats["start_time"]
-                        avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
-                        recent_avg_score = sum(stats["recent_scores"]) / len(stats["recent_scores"]) if stats["recent_scores"] else 0
-                        samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
-                        avg_inference = stats["total_inference_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
-                        avg_grading = stats["total_grading_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
-                        recent_avg_inference = sum(stats["recent_inference_times"]) / len(stats["recent_inference_times"]) if stats["recent_inference_times"] else 0
-                        recent_avg_grading = sum(stats["recent_grading_times"]) / len(stats["recent_grading_times"]) if stats["recent_grading_times"] else 0
                         
-                        progress_desc = (
-                            f"Completed: {stats['total_samples']}/{total_tasks} | "
-                            f"Avg Score: {avg_score:.1f} | Recent: {recent_avg_score:.1f} | "
-                            f"Inference: {avg_inference:.1f}s/recent{recent_avg_inference:.1f}s | "
-                            f"Grading: {avg_grading:.1f}s/recent{recent_avg_grading:.1f}s | "
-                            f"{samples_per_second:.2f} samples/sec"
-                        )
-                        progress_bar.set_description(progress_desc)
-                        progress_bar.update(len(results))
+                        
+                        # 更新进度bar的部分
+                        if self.results_stats["successful_samples"] > 0:
+                            # 计算当前指标平均值
+                            current_metrics = {}
+                            for key, value in self.results_stats["metrics_accumulation"].items():
+                                current_metrics[key] = value / self.results_stats["successful_samples"]
+                            
+                            # 计算其他统计信息
+                            elapsed = time.time() - stats["start_time"]
+                            avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
+                            recent_avg_score = sum(stats["recent_scores"]) / len(stats["recent_scores"]) if stats["recent_scores"] else 0
+                            samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
+                            avg_inference = stats["total_inference_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
+                            avg_grading = stats["total_grading_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
+                            recent_avg_inference = sum(stats["recent_inference_times"]) / len(stats["recent_inference_times"]) if stats["recent_inference_times"] else 0
+                            recent_avg_grading = sum(stats["recent_grading_times"]) / len(stats["recent_grading_times"]) if stats["recent_grading_times"] else 0
+                            
+                            progress_desc = (
+                                f"Completed: {stats['total_samples']}/{total_tasks} | "
+                                f"Score: {avg_score:.1f} | F1: {current_metrics.get('f1', 0):.2f} | "
+                                f"P: {current_metrics.get('precision', 0):.2f} | R: {current_metrics.get('recall', 0):.2f} | "
+                                f"Time: {avg_inference+avg_grading:.1f}s | {samples_per_second:.2f}/sec"
+                            )
+                            progress_bar.set_description(progress_desc)
+                            progress_bar.update(len(results))
                         
                         return results
                 
@@ -488,14 +513,32 @@ class Evaluator:
             
         # Final summary update
         self._update_summary()
+        
+        
+    def calculate_metrics_average(self):
+        """Calculate average metrics from accumulated values"""
+        successful_count = self.results_stats["successful_samples"]
+        if successful_count > 0:
+            self.results_stats["metrics_average"] = {
+                key: round(value / successful_count, 4)
+                for key, value in self.results_stats["metrics_accumulation"].items()
+            }
+        else:
+            self.results_stats["metrics_average"] = {
+                key: 0.0 for key in self.results_stats["metrics_accumulation"].keys()
+            }
+
 
     def _update_summary(self):
         """Update summary file, saving only key statistics"""
         try:
-            # Ensure output directory exists
+            # 确保输出目录存在
             os.makedirs(self.config.output_dir, exist_ok=True)
             
-            # Calculate statistics for each prompt
+            # 计算最新的指标平均值
+            self.calculate_metrics_average()
+            
+            # 计算统计信息，为每个prompt
             prompt_stats = {}
             for prompt_key, scores in self.results_stats["scores_by_prompt"].items():
                 if scores:
@@ -508,12 +551,12 @@ class Evaluator:
                         "std_dev": statistics.stdev(scores) if len(scores) > 1 else 0
                     }
             
-            # Calculate overall statistics
+            # 计算总体统计信息
             all_scores = []
             for scores in self.results_stats["scores_by_prompt"].values():
                 all_scores.extend(scores)
                 
-            # Score distribution
+            # 分数分布
             bins = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"]
             score_distribution = {bin_range: 0 for bin_range in bins}
             
@@ -525,12 +568,12 @@ class Evaluator:
                         score_distribution[bin_range] += 1
                         break
                         
-            # Overall statistics
+            # 整体统计
             stats = {
-                "total_samples": self.results_stats["successful_samples"] + self.results_stats["failed_samples"],
+                "total_samples": self.results_stats["total_samples"],
                 "valid_samples": self.results_stats["successful_samples"],
                 "error_samples": self.results_stats["failed_samples"],
-                "unique_images": 0,  # This value needs to be calculated separately
+                "unique_images": len(set(r["item"]["img"] for r in self.results if "item" in r and "img" in r["item"])),
                 "average_score": statistics.mean(all_scores) if all_scores else 0,
                 "median_score": statistics.median(all_scores) if all_scores else 0,
                 "min_score": min(all_scores) if all_scores else 0,
@@ -538,15 +581,15 @@ class Evaluator:
                 "std_dev": statistics.stdev(all_scores) if len(all_scores) > 1 else 0
             }
             
-            # Simplified error information - safely handle different error structures
+            # 简化错误信息
             simplified_errors = []
-            for error in self.results_stats["errors"][-20:]:  # Only keep the most recent 20 errors
+            for error in self.results_stats["errors"][-20:]:  # 只保留最近的20个错误
                 error_info = {
                     "prompt_key": error.get("prompt_key", "unknown"),
-                    "error": error.get("error", "")[:200]  # Truncate error message
+                    "error": error.get("error", "")[:200]  # 截断错误信息
                 }
                 
-                # Safely get image information
+                # 安全获取图像信息
                 if "item" in error:
                     if isinstance(error["item"], dict):
                         error_info["img"] = error["item"].get("img", "unknown")
@@ -557,14 +600,16 @@ class Evaluator:
                     
                 simplified_errors.append(error_info)
             
-            # Prepare summary data
+            # 准备汇总数据
             summary_data = {
-                "config": {k: v for k, v in asdict(self.config).items() if k != 'grading_api_key'},  # Exclude sensitive information
+                "config": {k: v for k, v in asdict(self.config).items() if k != 'grading_api_key'},
                 "analysis": {
                     "stats": stats,
                     "score_distribution": score_distribution,
                     "prompt_stats": prompt_stats,
-                    "recent_errors": simplified_errors
+                    "recent_errors": simplified_errors,
+                    # 添加平均指标
+                    "metrics_average": self.results_stats["metrics_average"]
                 },
                 "performance": {
                     "average_tokens_per_request": sum(r.get("generation", {}).get("usage", {}).get("total_tokens", 0) for r in self.results) / len(self.results) if self.results else 0,
@@ -575,41 +620,123 @@ class Evaluator:
                 "timestamp": time.time()
             }
             
-            # Save summary file
+            # 保存汇总文件
             summary_path = os.path.join(self.config.output_dir, self.config.summary_name)
             with open(summary_path, 'w', encoding='utf-8') as f:
                 json.dump(summary_data, f, ensure_ascii=False, indent=2)
-                
+                    
         except Exception as e:
             import traceback
             print(f"Error updating summary file: {str(e)}\n{traceback.format_exc()}")
+            
+            
+    def save_metrics_summary(self):
+        """Save a separate metrics summary file for visualization tools"""
+        metrics_path = os.path.join(self.config.output_dir, "metrics.json")
+        
+        # 收集所有样本的详细指标
+        sample_metrics = []
+        for result in self.results:
+            if "grading" in result and "connection_analysis" in result["grading"] and "metrics" in result["grading"]["connection_analysis"]:
+                metrics = result["grading"]["connection_analysis"]["metrics"]
+                sample_metrics.append({
+                    "file": result["item"]["img"],
+                    "precision": metrics.get("precision", 0),
+                    "recall": metrics.get("recall", 0),
+                    "f1": metrics.get("f1", 0),
+                    "conn_ratio": metrics.get("conn_ratio", 0),
+                    "perfect_match": metrics.get("perfect_match", 0),
+                    "prompt": result["prompt_key"]
+                })
+        
+        # 生成汇总数据
+        metrics_data = {
+            "averages": self.results_stats["metrics_average"],
+            "samples": sample_metrics,
+            "prompt_metrics": {}
+        }
+        
+        # 按提示词计算指标
+        for prompt_key in self.config.prompt_keys:
+            prompt_results = [r for r in sample_metrics if r["prompt"] == prompt_key]
+            if prompt_results:
+                metrics_data["prompt_metrics"][prompt_key] = {
+                    "precision": sum(r["precision"] for r in prompt_results) / len(prompt_results),
+                    "recall": sum(r["recall"] for r in prompt_results) / len(prompt_results),
+                    "f1": sum(r["f1"] for r in prompt_results) / len(prompt_results),
+                    "conn_ratio": sum(r["conn_ratio"] for r in prompt_results) / len(prompt_results),
+                    "perfect_match": sum(r["perfect_match"] for r in prompt_results) / len(prompt_results)
+                }
+        
+        # 保存指标文件
+        try:
+            with open(metrics_path, 'w', encoding='utf-8') as f:
+                json.dump(metrics_data, f, ensure_ascii=False, indent=2)
+            print(f"Detailed metrics saved to: {metrics_path}")
+        except Exception as e:
+            print(f"Error saving metrics summary: {str(e)}")
+
+
+
     
     def save_results(self):
-        """Final results saving - now only updates final summary"""
+        """Final results saving - now only updates final summary and outputs statistics"""
+        # 计算最新的指标平均值
+        self.calculate_metrics_average()
+        
+        # 更新总结文件
         self._update_summary()
         
-        # Calculate actual number of saved files
+        # 保存详细指标
+        self.save_metrics_summary()
+        
+        # 计算实际保存的文件数
         saved_files = 0
         if os.path.exists(self.config.output_dir):
             saved_files = len([f for f in os.listdir(self.config.output_dir) 
-                             if f.endswith('.json') and f != self.config.summary_name])
+                            if f.endswith('.json') and f != self.config.summary_name and f != 'metrics.json'])
         
         print(f"Summary results saved to: {os.path.join(self.config.output_dir, self.config.summary_name)}")
+        print(f"Detailed metrics saved to: {os.path.join(self.config.output_dir, 'metrics.json')}")
         print(f"Saved {saved_files} individual image results to {self.config.output_dir} directory")
         
-        # Analyze summary and print
+        # 分析总结并打印
         all_scores = []
         for scores in self.results_stats["scores_by_prompt"].values():
             all_scores.extend(scores)
-            
+                
         if self.config.verbose and all_scores:
-            print("\n=== Evaluation Results Summary ===")
+            # 原有评估结果摘要
+            print("\n" + "="*50)
+            print(" "*15 + "EVALUATION RESULTS SUMMARY")
+            print("="*50)
             print(f"Total samples: {self.results_stats['successful_samples'] + self.results_stats['failed_samples']}")
             print(f"Valid samples: {self.results_stats['successful_samples']}")
             print(f"Error samples: {self.results_stats['failed_samples']}")
             print(f"Overall average score: {statistics.mean(all_scores):.2f}")
             
-            # Score distribution
+            # 添加指标平均值输出
+            print("\n" + "="*50)
+            print(" "*15 + "CONNECTION METRICS SUMMARY")
+            print("="*50)
+            avg_metrics = self.results_stats["metrics_average"]
+            print(f"Precision (P): {avg_metrics.get('precision', 0):.4f}")
+            print(f"Recall (R): {avg_metrics.get('recall', 0):.4f}")
+            print(f"F1 Score: {avg_metrics.get('f1', 0):.4f}")
+            print(f"Connection Ratio (CR): {avg_metrics.get('conn_ratio', 0):.4f}")
+            print(f"Perfect Match Rate (PM): {avg_metrics.get('perfect_match', 0):.4f} ({int(avg_metrics.get('perfect_match', 0)*100)}%)")
+            
+            # 指标解释
+            print("\n" + "="*50)
+            print(" "*15 + "METRICS EXPLANATION")
+            print("="*50)
+            print("P (precision): Correct connections ÷ Total generated connections")
+            print("R (recall): Correct connections ÷ Total reference connections")
+            print("F1: Harmonic mean of precision and recall")
+            print("CR (conn_ratio): Total generated connections ÷ Total reference connections")
+            print("PM (perfect_match): Percentage of samples with F1=1 (perfect match)")
+            
+            # 分数分布
             bins = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"]
             score_distribution = {bin_range: 0 for bin_range in bins}
             
@@ -621,12 +748,22 @@ class Evaluator:
                         score_distribution[bin_range] += 1
                         break
             
-            print("\nScore distribution:")
+            print("\n" + "="*50)
+            print(" "*15 + "SCORE DISTRIBUTION")
+            print("="*50)
             for range_key, count in score_distribution.items():
-                print(f"{range_key}: {count} samples")
+                print(f"{range_key}: {count} samples ({count/len(all_scores)*100:.1f}%)")
             
-            print("\nStatistics by prompt:")
+            print("\n" + "="*50)
+            print(" "*15 + "PROMPT STATISTICS")
+            print("="*50)
             for prompt_key, scores in self.results_stats["scores_by_prompt"].items():
                 if scores:
                     avg_score = statistics.mean(scores)
                     print(f"{prompt_key}: Average score {avg_score:.2f} ({len(scores)} samples)")
+            
+            print("\n" + "="*50)
+
+
+
+
