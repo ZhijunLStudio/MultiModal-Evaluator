@@ -113,7 +113,7 @@ class Evaluator:
         
         # Execute multiple runs
         run_results = []
-        map_scores = []  # 收集所有运行的MAP分数
+        metrics_history = []  # 收集所有运行的指标
         
         for run_id in range(self.config.runs_per_prompt):
             try:
@@ -160,10 +160,34 @@ class Evaluator:
                 if "latency" not in grading_result:
                     grading_result["latency"] = grade_time
                 
-                # Get score and add to map scores list
+                # Get score and add to metrics history
                 score = grading_result.get("score", 0)
-                map_score = grading_result.get("connection_analysis", {}).get("metrics", {}).get("map", 0)
-                map_scores.append(map_score)
+                metrics = grading_result.get("connection_analysis", {}).get("metrics", {})
+                
+                # 提取指标
+                precision = metrics.get("precision", 0)
+                recall = metrics.get("recall", 0)
+                f1_score = metrics.get("f1", 0)
+                conn_ratio = metrics.get("conn_ratio", 0)
+                perfect_match = int(metrics.get("perfect_match", 0))
+                
+                # 保存指标历史
+                metrics_history.append({
+                    "precision": precision,
+                    "recall": recall,
+                    "f1": f1_score,
+                    "conn_ratio": conn_ratio,
+                    "perfect_match": perfect_match
+                })
+                
+                # 更新token使用量
+                if "usage" not in grading_result:
+                    grading_result["usage"] = {}
+                grading_result["usage"]["generation_tokens"] = llm_result.get("usage", {}).get("total_tokens", 0)
+                grading_result["usage"]["total_tokens"] = (
+                    grading_result["usage"].get("grading_tokens", 0) + 
+                    grading_result["usage"]["generation_tokens"]
+                )
                 
                 # Integrate results - keep full format for internal use
                 full_result = {
@@ -212,8 +236,12 @@ class Evaluator:
                         "metrics": {
                             "precision": 0,
                             "recall": 0,
-                            "map": 0
-                        }
+                            "f1": 0,
+                            "conn_ratio": 0,
+                            "perfect_match": 0
+                        },
+                        "final_unmatched_gen": [],
+                        "final_unmatched_ref": []
                     }),
                     "latency": {
                         "generation": llm_time,
@@ -222,9 +250,12 @@ class Evaluator:
                     },
                     "timestamp": time.time(),
                     "token_usage": {
-                        "prompt_tokens": llm_result.get("usage", {}).get("prompt_tokens", 0),
-                        "completion_tokens": llm_result.get("usage", {}).get("completion_tokens", 0),
-                        "total_tokens": llm_result.get("usage", {}).get("total_tokens", 0)
+                        "generation_tokens": llm_result.get("usage", {}).get("total_tokens", 0),
+                        "grading_tokens": grading_result.get("usage", {}).get("grading_tokens", 0),
+                        "total_tokens": (
+                            llm_result.get("usage", {}).get("total_tokens", 0) + 
+                            grading_result.get("usage", {}).get("grading_tokens", 0)
+                        )
                     }
                 }
                 
@@ -266,13 +297,23 @@ class Evaluator:
                 # Ensure output directory exists
                 os.makedirs(self.config.output_dir, exist_ok=True)
                 
-                # 创建包含所有MAP分数的字符串
-                map_str = "_".join([f"{int(s*100)}" for s in map_scores]) if map_scores else "0"
-                map_filename_part = f"map_{map_str}"
+                # 提取最后一次运行的指标用于文件名
+                if metrics_history:
+                    last_metrics = metrics_history[-1]
+                    precision = last_metrics.get("precision", 0)
+                    recall = last_metrics.get("recall", 0)
+                    f1_score = last_metrics.get("f1", 0)
+                    conn_ratio = last_metrics.get("conn_ratio", 0)
+                    perfect_match = int(last_metrics.get("perfect_match", 0))
+                    
+                    # 将指标值格式化为文件名（保留两位小数）
+                    metrics_str = f"p_{precision:.2f}_r_{recall:.2f}_f1_{f1_score:.2f}_cr_{conn_ratio:.2f}_pm_{perfect_match}"
+                else:
+                    metrics_str = "p_0.00_r_0.00_f1_0.00_cr_0.00_pm_0"
                 
                 # 创建文件名
                 img_name = item["img"]  # 只使用图像文件名，不包含文件夹
-                result_file = os.path.join(self.config.output_dir, f"{img_name}_{prompt_key}_{map_filename_part}.json")
+                result_file = os.path.join(self.config.output_dir, f"{img_name}_{prompt_key}_{metrics_str}.json")
 
                 
                 # Use lock to get access
@@ -298,7 +339,7 @@ class Evaluator:
                                 "file": item["img"],
                                 "folder": item["img_folder"],
                                 "tag": item.get("tag", ""),
-                                "map_scores": map_scores  # 存储MAP分数而非原始分数
+                                "metrics_history": metrics_history  # 存储指标历史
                             },
                             "reference": item["answer"],
                             "results": {}
@@ -320,6 +361,7 @@ class Evaluator:
                 print(f"Error saving individual results: {str(e)}\n{traceback.format_exc()}")
         
         return results
+
 
 
 

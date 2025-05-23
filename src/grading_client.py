@@ -13,50 +13,102 @@ class GradingClient:
         self.model = config.grading_model
         self.prompts = {}  # Will be set in Evaluator
     
+
+
+    def _clean_node_names(self, node_name: str) -> str:
+        """Clean node names by removing brackets, quotes, etc."""
+        # 移除方括号
+        if isinstance(node_name, str):
+            if node_name.startswith('[') and node_name.endswith(']'):
+                node_name = node_name[1:-1]
+            
+            # 移除引号
+            if (node_name.startswith('"') and node_name.endswith('"')) or \
+            (node_name.startswith("'") and node_name.endswith("'")):
+                node_name = node_name[1:-1]
+        
+        return node_name.strip() if isinstance(node_name, str) else str(node_name)
+
     def _extract_connections(self, text: str) -> List[Tuple[str, str, str]]:
         """Extract connection relationships from text using regex.
         Returns list of tuples (source, connection_type, target)
         """
         connections = []
         
+        # 更灵活的节点模式 - 支持多种节点格式
+        # 匹配: 普通单词(Node1)、带括号节点([Node])、带引号节点("Node")、带连字符节点(Node-1)等
+        node_pattern = r'(?:\[([^\]]+)\]|"([^"]+)"|\'([^\']+)\'|(\w+(?:-\w+)*))'
+        
         # 1. 提取箭头连接 (->)
-        arrow_pattern = re.compile(r'(\w+)\s*->\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        arrow_matches = arrow_pattern.findall(text)
-        for src, tgt in arrow_matches:
-            connections.append((src.strip(), "->", tgt.strip()))
+        arrow_pattern = re.compile(f'{node_pattern}\s*->\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
+        arrow_matches = re.findall(arrow_pattern, text)
         
-        # 2. 提取双连字符连接 (--)，明确保留 -- 符号
-        double_dash_pattern = re.compile(r'(\w+)\s*--\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        double_dash_matches = double_dash_pattern.findall(text)
-        for src, tgt in double_dash_matches:
-            connections.append((src.strip(), "--", tgt.strip()))  # 注意：使用 -- 而不是 -
+        for match in arrow_matches:
+            # 提取源节点和目标节点(每个匹配组都可能包含节点名)
+            src = next((s for s in match[:4] if s), '')
+            tgt = next((s for s in match[4:] if s), '')
+            if src and tgt:  # 确保都不为空
+                connections.append((src.strip(), "->", tgt.strip()))
         
-        # 3. 提取其他连字符连接 (-, —等)
-        # 排除已经匹配的 -- 和 ->
-        other_dash_pattern = re.compile(r'(\w+)\s*[—\-–−﹣－‐⁃‑‒\u2010-\u2015]\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        other_dash_matches = other_dash_pattern.findall(text)
-        for src, tgt in other_dash_matches:
-            src = src.strip()
-            tgt = tgt.strip()
-            # 检查这不是已经匹配为箭头或双连字符的连接
-            if not any(src == a_src and tgt == a_tgt for a_src, a_tgt in arrow_matches) and \
-            not any(src == d_src and tgt == d_tgt for d_src, d_tgt in double_dash_matches):
-                connections.append((src, "-", tgt))
+        # 2. 提取双向连接 (<->)
+        bidirectional_pattern = re.compile(f'{node_pattern}\s*<->\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
+        bidir_matches = re.findall(bidirectional_pattern, text)
         
-        # 4. 提取双向连接 (<->)
-        bidirectional_pattern = re.compile(r'(\w+)\s*<->\s*(\w+)(?:\s*\[.*?\])?', re.DOTALL)
-        bidir_matches = bidirectional_pattern.findall(text)
-        for src, tgt in bidir_matches:
-            connections.append((src.strip(), "<->", tgt.strip()))
+        for match in bidir_matches:
+            src = next((s for s in match[:4] if s), '')
+            tgt = next((s for s in match[4:] if s), '')
+            if src and tgt:
+                connections.append((src.strip(), "<->", tgt.strip()))
         
-        return connections
+        # 3. 提取双连字符连接 (--)
+        double_dash_pattern = re.compile(f'{node_pattern}\s*--\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
+        double_dash_matches = re.findall(double_dash_pattern, text)
+        
+        for match in double_dash_matches:
+            src = next((s for s in match[:4] if s), '')
+            tgt = next((s for s in match[4:] if s), '')
+            if src and tgt:
+                connections.append((src.strip(), "--", tgt.strip()))
+        
+        # 4. 提取单连字符连接 (-)，排除已匹配的
+        processed_text = text
+        for pattern in [arrow_pattern, bidirectional_pattern, double_dash_pattern]:
+            for match in re.finditer(pattern, text):
+                # 替换已匹配内容，防止重复匹配
+                start, end = match.span()
+                processed_text = processed_text[:start] + ' ' * (end - start) + processed_text[end:]
+        
+        # 使用修改后的文本查找单连字符连接
+        dash_pattern = re.compile(f'{node_pattern}\s*[—\-–−﹣－‐⁃‑‒\u2010-\u2015]\s*{node_pattern}(?:\s*\[.*?\])?', re.DOTALL)
+        dash_matches = re.findall(dash_pattern, processed_text)
+        
+        for match in dash_matches:
+            src = next((s for s in match[:4] if s), '')
+            tgt = next((s for s in match[4:] if s), '')
+            if src and tgt:
+                connections.append((src.strip(), "-", tgt.strip()))
+        
+        # 移除可能的重复连接
+        unique_connections = []
+        seen = set()
+        
+        for src, conn_type, tgt in connections:
+            connection_key = f"{src}|{conn_type}|{tgt}"
+            if connection_key not in seen:
+                seen.add(connection_key)
+                unique_connections.append((src, conn_type, tgt))
+        
+        return unique_connections
 
 
 
     
     def _format_connection(self, conn: Tuple[str, str, str]) -> str:
         """Format connection tuple as string, preserving connection type"""
-        return f"{conn[0]} {conn[1]} {conn[2]}"
+        src = self._clean_node_names(conn[0])
+        tgt = self._clean_node_names(conn[2])
+        return f"{src} {conn[1]} {tgt}"
+
 
     
     def _compare_connections(self, gen_connections: List[Tuple[str, str, str]], 
@@ -214,30 +266,38 @@ class GradingClient:
 
     
     def _calculate_metrics(self, exact_matches: int, semantic_matches: int, 
-                          total_gen: int, total_ref: int) -> Dict[str, float]:
-        """Calculate evaluation metrics correctly"""
-        # 确保语义匹配数量不会导致总匹配超过参考数量
+                        total_gen: int, total_ref: int) -> Dict[str, float]:
+        """Calculate evaluation metrics with F1 score and other ratios"""
+        # 确保总匹配数不会超过参考数量
         total_matches = min(exact_matches + semantic_matches, total_ref)
         
         # 计算精确率和召回率
         precision = total_matches / total_gen if total_gen > 0 else 0.0
         recall = total_matches / total_ref if total_ref > 0 else 0.0
         
-        # 计算标准AP和mAP
-        # AP是为每个参考连接找到匹配的概率
-        # 在我们的案例中，可以简化为正确匹配的参考连接数量比例
-        ap = recall  # 在这个场景中，AP等同于召回率
+        # 计算F1分数
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
         
-        # 确保所有指标在[0,1]范围内
-        precision = min(1.0, max(0.0, precision))
-        recall = min(1.0, max(0.0, recall))
-        ap = min(1.0, max(0.0, ap))
+        # 连接完整性比率 - 生成的连接总数 ÷ 参考的连接总数
+        conn_ratio = total_gen / total_ref if total_ref > 0 else 0.0
+        
+        # 全对率 (F1为1的情况)
+        perfect_match = 1.0 if abs(f1 - 1.0) < 0.001 else 0.0
+        
+        # 确保结果在[0,1]范围内，并保留两位小数
+        precision = round(min(1.0, max(0.0, precision)), 2)
+        recall = round(min(1.0, max(0.0, recall)), 2)
+        f1 = round(min(1.0, max(0.0, f1)), 2)
+        conn_ratio = round(conn_ratio, 2)
         
         return {
             "precision": precision,
             "recall": recall,
-            "map": ap  # 在我们的场景中，mAP就是AP
+            "f1": f1,
+            "conn_ratio": conn_ratio,
+            "perfect_match": perfect_match
         }
+
     
     async def grade(self, session, prompt: str, generated_answer: str, reference_answer: str) -> Dict[str, Any]:
         """Call grading API to evaluate the generated answer with focus on connection relationships"""
@@ -268,8 +328,12 @@ class GradingClient:
         if not comparison['unmatched_gen'] or not comparison['unmatched_ref']:
             return {
                 "content": "No semantic matching needed - all connections exactly matched or one set is empty.",
-                "score": int(min(100, initial_metrics["map"] * 100)),
-                "usage": {},
+                "score": int(min(100, initial_metrics["f1"] * 100)),  # 使用F1作为分数基础
+                "usage": {
+                    "generation_tokens": 0,
+                    "grading_tokens": 0,
+                    "total_tokens": 0
+                },
                 "latency": 0,
                 "connection_analysis": {
                     "comparison": comparison,
@@ -277,7 +341,9 @@ class GradingClient:
                     "ref_connections": [self._format_connection(c) for c in ref_connections],
                     "semantic_matches": [],
                     "total_matches": comparison["exact_match_count"],
-                    "metrics": initial_metrics
+                    "metrics": initial_metrics,
+                    "final_unmatched_gen": comparison["unmatched_gen"],
+                    "final_unmatched_ref": comparison["unmatched_ref"]
                 }
             }
         
@@ -332,31 +398,40 @@ class GradingClient:
             "messages": [
                 {"role": "user", "content": full_prompt}
             ],
-            # "temperature": 0.2,  # Should be deterministic, use lower temperature
-            # "max_tokens": 1024,
         }
         
         try:
             async with session.post(f"{self.api_base}/chat/completions", 
                                     headers=headers, 
                                     json=data,
-                                    timeout=60) as response:
+                                    timeout=600) as response:
                 response_json = await response.json()
                 end_time = time.time()
                 
                 if "choices" in response_json and len(response_json["choices"]) > 0:
                     content = response_json["choices"][0]["message"]["content"]
                     
-                    # 提取语义匹配对（已去重）
+                    # 提取语义匹配对
                     semantic_matches = self._extract_semantic_matches(content)
                     
-                    # 计算指标（确保不会因为重复计算而超过1）
-                    metrics = self._calculate_metrics(
-                        comparison["exact_match_count"], 
-                        len(semantic_matches),
-                        comparison["total_gen"], 
-                        comparison["total_ref"]
-                    )
+                    # 将语义匹配转换为格式化连接，方便比较
+                    semantic_gen_matches = set()
+                    semantic_ref_matches = set()
+                    for match in semantic_matches:
+                        gen_clean = self._clean_match_string(match["generated"])
+                        ref_clean = self._clean_match_string(match["reference"])
+                        semantic_gen_matches.add(gen_clean)
+                        semantic_ref_matches.add(ref_clean)
+                    
+                    # 计算最终未匹配的连接
+                    # 先获取精确匹配的连接集合
+                    exact_matches_set = set(comparison["exact_matches"])
+                    
+                    # 计算经过语义匹配后仍未匹配的连接
+                    final_unmatched_gen = [conn for conn in comparison["unmatched_gen"] 
+                                        if conn not in semantic_gen_matches]
+                    final_unmatched_ref = [conn for conn in comparison["unmatched_ref"] 
+                                        if conn not in semantic_ref_matches]
                     
                     # 计算总匹配数（确保不超过参考总数）
                     total_matches = min(
@@ -364,13 +439,25 @@ class GradingClient:
                         comparison["total_ref"]
                     )
                     
-                    # 生成分数 - 基于 mAP
-                    score = int(min(100, metrics["map"] * 100))
+                    # 计算新指标
+                    metrics = self._calculate_metrics(
+                        comparison["exact_match_count"], 
+                        len(semantic_matches),
+                        comparison["total_gen"], 
+                        comparison["total_ref"]
+                    )
+                    
+                    # 生成分数 - 基于 F1
+                    score = int(min(100, metrics["f1"] * 100))
                     
                     result = {
                         "content": content,
                         "score": score,
-                        "usage": response_json.get("usage", {}),
+                        "usage": {
+                            "generation_tokens": 0,  # 在外部填充
+                            "grading_tokens": response_json.get("usage", {}).get("total_tokens", 0),
+                            "total_tokens": response_json.get("usage", {}).get("total_tokens", 0)
+                        },
                         "latency": end_time - start_time,
                         "connection_analysis": {
                             "comparison": comparison,
@@ -378,7 +465,9 @@ class GradingClient:
                             "ref_connections": [self._format_connection(c) for c in ref_connections],
                             "semantic_matches": semantic_matches,
                             "total_matches": total_matches,
-                            "metrics": metrics
+                            "metrics": metrics,
+                            "final_unmatched_gen": final_unmatched_gen,
+                            "final_unmatched_ref": final_unmatched_ref
                         }
                     }
                     return result
@@ -387,8 +476,12 @@ class GradingClient:
                     return {
                         "error": "Invalid API response", 
                         "content": "", 
-                        "score": int(min(100, initial_metrics["map"] * 100)),
-                        "usage": {}, 
+                        "score": int(min(100, initial_metrics["f1"] * 100)),
+                        "usage": {
+                            "generation_tokens": 0,
+                            "grading_tokens": 0,
+                            "total_tokens": 0
+                        }, 
                         "latency": end_time - start_time,
                         "connection_analysis": {
                             "comparison": comparison,
@@ -396,7 +489,9 @@ class GradingClient:
                             "ref_connections": [self._format_connection(c) for c in ref_connections],
                             "semantic_matches": [],
                             "total_matches": comparison["exact_match_count"],
-                            "metrics": initial_metrics
+                            "metrics": initial_metrics,
+                            "final_unmatched_gen": comparison["unmatched_gen"],
+                            "final_unmatched_ref": comparison["unmatched_ref"]
                         }
                     }
                 
@@ -405,8 +500,12 @@ class GradingClient:
             return {
                 "error": str(e), 
                 "content": "", 
-                "score": int(min(100, initial_metrics["map"] * 100)),
-                "usage": {}, 
+                "score": int(min(100, initial_metrics["f1"] * 100)),
+                "usage": {
+                    "generation_tokens": 0,
+                    "grading_tokens": 0,
+                    "total_tokens": 0
+                },
                 "latency": time.time() - start_time,
                 "connection_analysis": {
                     "comparison": comparison,
@@ -414,9 +513,12 @@ class GradingClient:
                     "ref_connections": [self._format_connection(c) for c in ref_connections],
                     "semantic_matches": [],
                     "total_matches": comparison["exact_match_count"],
-                    "metrics": initial_metrics
+                    "metrics": initial_metrics,
+                    "final_unmatched_gen": comparison["unmatched_gen"],
+                    "final_unmatched_ref": comparison["unmatched_ref"]
                 }
             }
+
     
     def _extract_score(self, text: str) -> float:
         """Extract score from grading text"""

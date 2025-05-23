@@ -4,8 +4,8 @@ import glob
 import re
 
 # 定义源文件夹和目标文件夹
-source_folder = "benchmark_output/test-v2-11"
-target_folder = "benchmark_output/0523-x1-sft"
+source_folder = "benchmark_output/qwen2.5-vl-32B-origin"
+target_folder = "benchmark_output/0523-qwen2.5-vl-32B-origin"
 
 # 确保目标文件夹存在
 os.makedirs(target_folder, exist_ok=True)
