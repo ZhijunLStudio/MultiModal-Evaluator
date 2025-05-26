@@ -269,8 +269,8 @@ class GradingClient:
                 seen_pairs.add(pair_id)
                 unique_matches.append(match)
         
-        # Only print debug information if we failed to find any matches
-        if not unique_matches and self.config.verbose:
+        # Only print debug information if we failed to find any matches and it's not a score:0 case
+        if not unique_matches and self.config.verbose and "score: 0" not in text.lower():
             print("\n----- EXTRACTION FAILED -----")
             print(f"Failed to extract semantic matches from text:")
             print(f"First 200 chars: {text[:200]}...")
@@ -278,6 +278,7 @@ class GradingClient:
             print("----- END EXTRACTION DEBUG -----\n")
         
         return unique_matches
+
 
 
 
@@ -427,8 +428,16 @@ class GradingClient:
             ],
         }
         
+        # 仅当终端指定时添加可选参数
+        if hasattr(self.config, 'grading_temperature') and self.config.grading_temperature is not None:
+            data["temperature"] = self.config.grading_temperature
+        if hasattr(self.config, 'grading_top_p') and self.config.grading_top_p is not None:
+            data["top_p"] = self.config.grading_top_p
+        if hasattr(self.config, 'grading_max_tokens') and self.config.grading_max_tokens is not None:
+            data["max_tokens"] = self.config.grading_max_tokens
+        
         try:
-            async with session.post(f"{self.api_base}/chat/completions", 
+            async with session.post(f"{self.config.grading_api_base}/chat/completions", 
                                     headers=headers, 
                                     json=data,
                                     timeout=600) as response:

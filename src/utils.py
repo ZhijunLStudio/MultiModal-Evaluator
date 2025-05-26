@@ -14,31 +14,28 @@ def parse_args():
     parser.add_argument("--output-dir", type=str, required=True, help="Output directory for all results")
     parser.add_argument("--summary-name", type=str, default="summary.json", help="Name of summary result file")
     
-    # Model mode selection
-    parser.add_argument("--model-mode", type=str, choices=["local", "remote"], default="local", 
-                        help="Model API mode: local (LLaMA Factory) or remote (OpenAI-compatible)")
+    # Answer API parameters
+    parser.add_argument("--answer-api", type=str, help="Answer API base URL")
+    parser.add_argument("--answer-key", type=str, help="Answer API key")
+    parser.add_argument("--answer-model", type=str, help="Answer model name")
+    parser.add_argument("--answer-temperature", type=float, help="Answer generation temperature")
+    parser.add_argument("--answer-top-p", type=float, help="Answer top-p sampling parameter")
+    parser.add_argument("--answer-top-k", type=int, help="Answer top-k sampling parameter")
+    parser.add_argument("--answer-max-tokens", type=int, help="Answer maximum tokens to generate")
     
-    # Local model parameters
-    parser.add_argument("--llama-api", type=str, default="http://0.0.0.0:37000/v1", help="LLaMA Factory API base URL")
-    parser.add_argument("--llama-key", type=str, default="111", help="LLaMA Factory API key")
-    parser.add_argument("--llama-model", type=str, default="Qwen2-VL-7B-Instruct", help="LLaMA Factory model name")
+    # Grading API parameters
+    parser.add_argument("--grading-api", type=str, help="Grading API base URL")
+    parser.add_argument("--grading-key", type=str, help="Grading API key")
+    parser.add_argument("--grading-model", type=str, help="Grading model name")
+    parser.add_argument("--grading-temperature", type=float, help="Grading temperature")
+    parser.add_argument("--grading-top-p", type=float, help="Grading top-p sampling parameter")
+    parser.add_argument("--grading-max-tokens", type=int, help="Grading maximum tokens to generate")
     
-    # Remote model parameters
-    parser.add_argument("--remote-api", type=str, default="https://api.openai.com/v1", help="Remote API base URL")
-    parser.add_argument("--remote-key", type=str, default="your-api-key", help="Remote API key")
-    parser.add_argument("--remote-model", type=str, default="o4-mini", help="Remote model name")
-    parser.add_argument("--no-remote-params", action="store_true", help="Don't send generation parameters to remote API")
-    
-    # Grading parameters
-    parser.add_argument("--grading-api", type=str, default="grading-api", help="Grading API base URL")
-    parser.add_argument("--grading-key", type=str, default="grading-key", help="Grading API key")
-    parser.add_argument("--grading-model", type=str, default="deepseek-v3-241226", help="Grading model name")
-    
-    # Generation parameters
-    parser.add_argument("--temperature", type=float, default=0.7, help="Generation temperature")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling parameter")
-    parser.add_argument("--top-k", type=int, default=50, help="Top-k sampling parameter")
-    parser.add_argument("--max-tokens", type=int, default=1024, help="Maximum tokens to generate")
+    # Backward compatibility - these will set answer API parameters
+    parser.add_argument("--temperature", type=float, help="[Deprecated] Use --answer-temperature instead")
+    parser.add_argument("--top-p", type=float, help="[Deprecated] Use --answer-top-p instead")
+    parser.add_argument("--top-k", type=int, help="[Deprecated] Use --answer-top-k instead")
+    parser.add_argument("--max-tokens", type=int, help="[Deprecated] Use --answer-max-tokens instead")
     
     # Evaluation parameters
     parser.add_argument("--samples", type=int, default=-1, help="Number of samples to evaluate, -1 means all")
@@ -65,36 +62,63 @@ def create_config_from_args(args):
         prompt_path=args.prompts,
         output_dir=args.output_dir,
         summary_name=args.summary_name,
-        
-        model_mode=args.model_mode,
-        
-        llama_api_base=args.llama_api,
-        llama_api_key=args.llama_key,
-        llama_model=args.llama_model,
-        
-        remote_api_base=args.remote_api,
-        remote_api_key=args.remote_key,
-        remote_model=args.remote_model,
-        remote_use_params=not args.no_remote_params,
-        
-        grading_api_base=args.grading_api,
-        grading_api_key=args.grading_key,
-        grading_model=args.grading_model,
-        grading_lang=args.grading_lang,
-        
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        max_tokens=args.max_tokens,
-        
-        eval_samples=args.samples,
-        num_workers=args.workers,
-        prompt_keys=args.prompt_keys,
-        runs_per_prompt=args.runs,
-        
-        save_individual=not args.no_individual if hasattr(args, "no_individual") else True
     )
+    
+    # 设置回答API参数
+    if hasattr(args, 'answer_api') and args.answer_api:
+        config.answer_api_base = args.answer_api
+    if hasattr(args, 'answer_key') and args.answer_key:
+        config.answer_api_key = args.answer_key
+    if hasattr(args, 'answer_model') and args.answer_model:
+        config.answer_model = args.answer_model
+        
+    # 设置回答API可选参数
+    if hasattr(args, 'answer_temperature') and args.answer_temperature is not None:
+        config.answer_temperature = args.answer_temperature
+    elif hasattr(args, 'temperature') and args.temperature is not None:  # 向后兼容
+        config.answer_temperature = args.temperature
+        
+    if hasattr(args, 'answer_top_p') and args.answer_top_p is not None:
+        config.answer_top_p = args.answer_top_p
+    elif hasattr(args, 'top_p') and args.top_p is not None:  # 向后兼容
+        config.answer_top_p = args.top_p
+        
+    if hasattr(args, 'answer_top_k') and args.answer_top_k is not None:
+        config.answer_top_k = args.answer_top_k
+    elif hasattr(args, 'top_k') and args.top_k is not None:  # 向后兼容
+        config.answer_top_k = args.top_k
+        
+    if hasattr(args, 'answer_max_tokens') and args.answer_max_tokens is not None:
+        config.answer_max_tokens = args.answer_max_tokens
+    elif hasattr(args, 'max_tokens') and args.max_tokens is not None:  # 向后兼容
+        config.answer_max_tokens = args.max_tokens
+    
+    # 设置评分API参数
+    if hasattr(args, 'grading_api') and args.grading_api:
+        config.grading_api_base = args.grading_api
+    if hasattr(args, 'grading_key') and args.grading_key:
+        config.grading_api_key = args.grading_key
+    if hasattr(args, 'grading_model') and args.grading_model:
+        config.grading_model = args.grading_model
+    
+    # 设置评分API可选参数
+    if hasattr(args, 'grading_temperature') and args.grading_temperature is not None:
+        config.grading_temperature = args.grading_temperature
+    if hasattr(args, 'grading_top_p') and args.grading_top_p is not None:
+        config.grading_top_p = args.grading_top_p
+    if hasattr(args, 'grading_max_tokens') and args.grading_max_tokens is not None:
+        config.grading_max_tokens = args.grading_max_tokens
+    
+    # 设置评估参数
+    config.eval_samples = args.samples
+    config.num_workers = args.workers
+    config.prompt_keys = args.prompt_keys
+    config.runs_per_prompt = args.runs
+    config.grading_lang = args.grading_lang
+    config.save_individual = not args.no_individual if hasattr(args, 'no_individual') else True
+    
     return config
+
 
 
 def print_performance_dashboard(stats, config):

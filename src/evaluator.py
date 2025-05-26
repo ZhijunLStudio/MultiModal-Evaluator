@@ -9,7 +9,7 @@ from tqdm import tqdm
 from dataclasses import asdict
 from src.config import Config
 from src.image_processor import ImageProcessor
-from src.model_client import LocalModelClient, RemoteModelClient
+from src.model_client import AnswerApiClient
 from src.grading_client import GradingClient
 
 class Evaluator:
@@ -17,51 +17,49 @@ class Evaluator:
         self.config = config
         self.prompts = self._load_prompts()
         
-        # Initialize the appropriate model client based on configuration
-        if config.model_mode == "local":
-            self.model_client = LocalModelClient(config)
-        elif config.model_mode == "remote":
-            self.model_client = RemoteModelClient(config)
-        else:
-            raise ValueError(f"Invalid model mode: {config.model_mode}. Must be 'local' or 'remote'")
+        # 初始化回答模型客户端
+        self.answer_api_client = AnswerApiClient(config)
             
+        # 初始化评分模型客户端
         self.grading_client = GradingClient(config)
         self.grading_client.prompts = self.prompts
+        
+        # 初始化统计数据结构
         self.results_stats = {  # Only save statistics, not full results
             "total_samples": 0,
             "successful_samples": 0,
             "failed_samples": 0,
             "scores_by_prompt": {},
             "errors": [],
-             # 新增：统计各种指标的累积值
+            # 累积指标
             "metrics_accumulation": {
-            "precision": 0,
-            "recall": 0,
-            "f1": 0,
-            "conn_ratio": 0,
-            "perfect_match": 0
+                "precision": 0,
+                "recall": 0,
+                "f1": 0,
+                "conn_ratio": 0,
+                "perfect_match": 0
             },
-            # 新增：各指标的平均值
+            # 平均指标
             "metrics_average": {}
         }
         
+        self.individual_results = {}  # 临时存储单个图像结果
+        self.results = []  # 保存所有结果
+        self.file_locks = {}  # 文件锁字典
         
-        self.individual_results = {}  # Temporary storage for individual image results
-        self.results = []  # Keep all results
-        self.file_locks = {}  # Initialize file locks dictionary
-        
-        # Validate and set prompt keys to use
+        # 验证和设置要使用的提示键
         if not self.config.prompt_keys:
             self.config.prompt_keys = [k for k in self.prompts.keys() 
-                                      if not k.startswith("grading_prompt")]
+                                    if not k.startswith("grading_prompt")]
         else:
             for key in self.config.prompt_keys:
                 if key not in self.prompts:
-                    raise ValueError(f"Specified prompt key '{key}' does not exist")
+                    raise ValueError(f"指定的提示键'{key}'不存在")
                 
-        # Initialize statistics for each prompt
+        # 为每个提示初始化统计数据
         for key in self.config.prompt_keys:
             self.results_stats["scores_by_prompt"][key] = []
+
     
     def _load_prompts(self) -> Dict[str, str]:
         """Load prompts from file"""
@@ -131,7 +129,7 @@ class Evaluator:
             try:
                 # Call model API
                 llm_start = time.time()
-                llm_result = await self.model_client.generate(session, generation_prompt, image_base64)
+                llm_result = await self.answer_api_client.generate(session, generation_prompt, image_base64)
                 llm_time = time.time() - llm_start
                 
                 if "error" in llm_result:
@@ -148,6 +146,10 @@ class Evaluator:
                     results.append(error_result)
                     self.results_stats["errors"].append(error_result)
                     
+                    # If API error, stop execution
+                    if "API Error" in llm_result.get('error', ''):
+                        raise Exception(f"Critical API error: {llm_result.get('error', '')}")
+                    
                     # Add to run results
                     run_results.append({
                         "run_id": run_id,
@@ -156,15 +158,22 @@ class Evaluator:
                     })
                     continue
                 
-                # Call grading API
-                grade_start = time.time()
-                grading_result = await self.grading_client.grade(
-                    session,
-                    generation_prompt,
-                    llm_result["content"],
-                    item["answer"]
+                # Start grading task asynchronously
+                grading_task = asyncio.create_task(
+                    self.grading_client.grade(
+                        session,
+                        generation_prompt,
+                        llm_result["content"],
+                        item["answer"]
+                    )
                 )
-                grade_time = time.time() - grade_start
+                
+                # We can continue with other tasks while grading happens in background
+                # For simplicity in this implementation, we'll still wait for the result
+                
+                # Wait for grading to complete when needed
+                grading_result = await grading_task
+                grade_time = grading_result.get("latency", 0)
                 
                 # Ensure results include latency time
                 if "latency" not in llm_result:
@@ -378,16 +387,12 @@ class Evaluator:
         
         return results
 
-
-
-
     async def run(self) -> None:
         """Run evaluation - process samples sequentially"""
         data = self._load_jsonl()
         print(f"Loaded {len(data)} items for evaluation")
         print(f"Using these prompt keys: {self.config.prompt_keys}")
         print(f"Each prompt will run {self.config.runs_per_prompt} times")
-        print(f"Using model mode: {self.config.model_mode}")
         
         # If individual results need to be saved, ensure output directory exists
         if self.config.save_individual and not os.path.exists(self.config.output_dir):
@@ -763,7 +768,3 @@ class Evaluator:
                     print(f"{prompt_key}: Average score {avg_score:.2f} ({len(scores)} samples)")
             
             print("\n" + "="*50)
-
-
-
-

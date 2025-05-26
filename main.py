@@ -22,12 +22,19 @@ async def main():
     print(f"- Number of workers: {config.num_workers}")
     print(f"- Evaluation samples: {config.eval_samples} (-1 means all)")
     print(f"- Save individual results: {config.save_individual}")
-    print(f"- Using mode: {config.model_mode}")
-    
-    if config.model_mode == "remote":
-        print(f"- Remote model: {config.remote_model}")
-        print(f"- Using generation parameters: {config.remote_use_params}")
-    
+    print(f"\nAnswer API Configuration:")
+    print(f"- API URL: {config.answer_api_base}")
+    print(f"- Model: {config.answer_model}")
+    print(f"- Temperature: {config.answer_temperature}")
+    print(f"- Top-P: {config.answer_top_p}")
+    print(f"- Top-K: {config.answer_top_k}")
+    print(f"- Max tokens: {config.answer_max_tokens}")
+    print(f"\nGrading API Configuration:")
+    print(f"- API URL: {config.grading_api_base}")
+    print(f"- Model: {config.grading_model}")
+    print(f"- Temperature: {config.grading_temperature}")
+    print(f"- Top-P: {config.grading_top_p}")
+    print(f"- Max tokens: {config.grading_max_tokens}")
     
     try:
         # Create evaluator and run
@@ -48,6 +55,7 @@ async def main():
         return 1
     
     return 0
+
 
 if __name__ == "__main__":
     # Required for Windows platform

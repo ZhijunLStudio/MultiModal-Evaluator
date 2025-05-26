@@ -10,30 +10,26 @@ class Config:
     output_dir: str = "results/"  # Output directory
     summary_name: str = "summary.json"  # Summary file name
     
-    # Model mode: 'local' or 'remote'
-    model_mode: str = "local"
+    # Answer API configuration
+    answer_api_base: str = "http://0.0.0.0:37000/v1"
+    answer_api_key: str = "111"
+    answer_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
     
-    # Local API configuration
-    llama_api_base: str = "http://0.0.0.0:37000/v1"
-    llama_api_key: str = "111"
-    llama_model: str = "Qwen/Qwen2.5-VL-72B-Instruct"
-    
-    # Remote API configuration
-    remote_api_base: str = "https://api.openai.com/v1"
-    remote_api_key: str = "your-api-key"
-    remote_model: str = "o4-mini"
-    remote_use_params: bool = True
+    # Answer API parameters (optional)
+    answer_temperature: Optional[float] = None
+    answer_top_p: Optional[float] = None
+    answer_top_k: Optional[int] = None
+    answer_max_tokens: Optional[int] = None
     
     # Grading API configuration
     grading_api_base: str = "api-grader"
     grading_api_key: str = "your api key here"
     grading_model: str = "deepseek-v3-241226"
     
-    # Generation parameters
-    temperature: float = 0.7
-    top_p: float = 0.9
-    top_k: int = 50
-    max_tokens: int = 4096
+    # Grading API parameters (optional)
+    grading_temperature: Optional[float] = None
+    grading_top_p: Optional[float] = None
+    grading_max_tokens: Optional[int] = None
     
     # Evaluation configuration
     eval_samples: int = -1  # -1 means evaluate all samples
