@@ -151,19 +151,14 @@ class GradingClient:
         """Extract semantic matches from grading model output in JSON format"""
         matches = []
         
-        # 1. 尝试从 ```json ... ``` 代码块提取 JSON
+        # 1. First try to extract from JSON blocks
         json_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
         json_matches = re.findall(json_pattern, text, re.DOTALL)
         
         if json_matches:
-            for json_text in json_matches:
+            for i, json_text in enumerate(json_matches):
                 try:
-                    # if self.config.verbose:
-                    #     print(f"Found JSON text: {json_text[:100]}...")
-                    
                     data = json.loads(json_text)
-                    
-                    # 检查是否包含 semantic_matches
                     if "semantic_matches" in data and isinstance(data["semantic_matches"], list):
                         for match in data["semantic_matches"]:
                             if isinstance(match, dict) and "generated" in match and "reference" in match:
@@ -171,24 +166,19 @@ class GradingClient:
                                 ref = self._clean_match_string(match["reference"])
                                 matches.append({"generated": gen, "reference": ref})
                         
-                        # if matches and self.config.verbose:
-                        #     print(f"Successfully extracted {len(matches)} semantic matches from JSON")
-                        
-                        # 有效匹配后返回，不再尝试其他方法
                         if matches:
                             return matches
                 except json.JSONDecodeError as e:
-                    if self.config.verbose:
-                        print(f"JSON decode error: {str(e)}")
-                    continue
+                    # Only print in verbose mode and if this is the last JSON block
+                    if self.config.verbose and i == len(json_matches) - 1:
+                        print(f"JSON decode error in block {i+1}: {e}")
+                        print(f"JSON block sample: {json_text[:100]}...")
                 except Exception as e:
-                    if self.config.verbose:
-                        print(f"Error processing JSON: {str(e)}")
-                    continue
+                    if self.config.verbose and i == len(json_matches) - 1:
+                        print(f"Error processing JSON block {i+1}: {e}")
         
-        # 2. 如果未从代码块提取成功，尝试直接解析整个文本
+        # 2. Try parsing the entire text as JSON
         try:
-            
             data = json.loads(text)
             if "semantic_matches" in data and isinstance(data["semantic_matches"], list):
                 for match in data["semantic_matches"]:
@@ -197,50 +187,79 @@ class GradingClient:
                         ref = self._clean_match_string(match["reference"])
                         matches.append({"generated": gen, "reference": ref})
                 
-                # if matches and self.config.verbose:
-                #     print(f"Successfully extracted {len(matches)} semantic matches from full text")
-                
-                # 有效匹配后返回
                 if matches:
                     return matches
-        except json.JSONDecodeError:
-            if self.config.verbose:
-                print("Failed to parse entire text as JSON")
-        except Exception as e:
-            if self.config.verbose:
-                print(f"Error processing text as JSON: {str(e)}")
+        except Exception:
+            pass
         
-        # 3. 如果 JSON 解析都失败，回退到正则表达式方法
-        if self.config.verbose:
-            print("Falling back to regex pattern matching")
+        # 3. Enhanced regex patterns to match more formats
+        patterns = [
+            # Original patterns
+            r'Generated:\s*([^=\n]+?)\s*=\s*Reference:\s*([^\n]+)',
+            r'`([^`]+)`\s*(?:is|are)?\s*equivalent to\s*`([^`]+)`',
+            r'\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|',
+            
+            # Additional patterns
+            r'Generated connection\s*[`"]([^`"]+)[`"]\s*matches reference\s*[`"]([^`"]+)[`"]',
+            r'([^=\n]+?)\s*=\s*semantically equivalent to\s*=>\s*([^\n]+)',
+            r'Generated:\s*"?([^"=\n]+?)"?\s*[=≈]\s*"?([^"\n]+)"?\s*(?:Reference|Ref)',
+            r'Generated\s*(?:connection)?(?::|->)?\s*["`]?([^"`\n]+)["`]?\s*(?:is matched to|is equivalent to|≈|=)\s*["`]?([^"`\n]+)["`]?(?:\s*in Reference)?',
+            r'(?:Pair|Match)\s*\d+:\s*([^=\n]+?)\s*(?:=|->|≈)\s*([^\n]+)',
+            r'"([^"]+)"\s*in generated\s*(?:matches|corresponds to|is equivalent to)\s*"([^"]+)"\s*in reference',
+            
+            # Simple patterns that might catch more cases
+            r'([^=\n,]+?)\s*=>\s*([^\n,]+)',  # Simple arrow pattern
+            r'([^=\n,]+?)\s*↔\s*([^\n,]+)',   # Unicode bidirectional arrow
+            
+            # Language-specific patterns
+            r'生成的\s*[`"]([^`"]+)[`"]\s*匹配参考\s*[`"]([^`"]+)[`"]',
+            r'生成:\s*"?([^"=\n]+?)"?\s*[=≈]\s*"?([^"\n]+)"?\s*参考'
+        ]
         
-        # 主要匹配模式
-        main_pattern = r'Generated:\s*([^=\n]+?)\s*=\s*Reference:\s*([^\n]+)'
-        pairs = re.findall(main_pattern, text, re.IGNORECASE)
+        for pattern in patterns:
+            pairs = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
+            for gen, ref in pairs:
+                gen_clean = self._clean_match_string(gen)
+                ref_clean = self._clean_match_string(ref)
+                if gen_clean and ref_clean:  # Ensure non-empty strings
+                    matches.append({"generated": gen_clean, "reference": ref_clean})
+            
+            if matches:  # If we found matches with this pattern, no need to try others
+                break
         
-        for gen, ref in pairs:
-            gen_clean = self._clean_match_string(gen)
-            ref_clean = self._clean_match_string(ref)
-            matches.append({"generated": gen_clean, "reference": ref_clean})
-        
-        # 备用匹配模式
+        # 4. Try to extract from bullet or numbered lists
         if not matches:
-            alt_patterns = [
-                r'`([^`]+)`\s*(?:is|are)?\s*equivalent to\s*`([^`]+)`',
-                r'\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|'
+            list_patterns = [
+                r'[-*•]\s*Generated:\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*Reference:\s*[`"]?([^`"\n]+)[`"]?',
+                r'[-*•]\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*[`"]?([^`"\n]+)[`"]?',
+                r'\d+\.\s*Generated:\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*Reference:\s*[`"]?([^`"\n]+)[`"]?',
+                r'\d+\.\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*[`"]?([^`"\n]+)[`"]?'
             ]
             
-            for pattern in alt_patterns:
-                pairs = re.findall(pattern, text, re.IGNORECASE)
+            for pattern in list_patterns:
+                pairs = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
                 for gen, ref in pairs:
                     gen_clean = self._clean_match_string(gen)
                     ref_clean = self._clean_match_string(ref)
-                    matches.append({"generated": gen_clean, "reference": ref_clean})
+                    if gen_clean and ref_clean:
+                        matches.append({"generated": gen_clean, "reference": ref_clean})
                 
-                if matches:  # 找到匹配就停止尝试
+                if matches:
                     break
         
-        # 4. 去重处理
+        # 5. Try a very aggressive approach for tables and key-value structures
+        if not matches:
+            # Look for tables with | delimiters
+            table_pattern = r'\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|'
+            table_matches = re.findall(table_pattern, text)
+            for col1, col2 in table_matches:
+                # Try both orders as we don't know which column is gen vs ref
+                gen_clean = self._clean_match_string(col1)
+                ref_clean = self._clean_match_string(col2)
+                if gen_clean and ref_clean and "->" in gen_clean and "->" in ref_clean:
+                    matches.append({"generated": gen_clean, "reference": ref_clean})
+        
+        # 6. De-duplicate matches
         unique_matches = []
         seen_pairs = set()
         
@@ -250,10 +269,19 @@ class GradingClient:
                 seen_pairs.add(pair_id)
                 unique_matches.append(match)
         
-        if self.config.verbose:
-            print(f"Final extraction result: {len(unique_matches)} unique semantic matches")
+        # Only print debug information if we failed to find any matches
+        if not unique_matches and self.config.verbose:
+            print("\n----- EXTRACTION FAILED -----")
+            print(f"Failed to extract semantic matches from text:")
+            print(f"First 200 chars: {text[:200]}...")
+            print(f"Last 200 chars: ...{text[-200:]}")
+            print("----- END EXTRACTION DEBUG -----\n")
         
         return unique_matches
+
+
+
+
 
     def _clean_match_string(self, text: str) -> str:
         """Clean match string by removing quotes, asterisks, etc."""
