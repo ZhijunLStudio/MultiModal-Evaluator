@@ -10,9 +10,9 @@ from dataclasses import asdict
 from src.config import Config
 from src.image_processor import ImageProcessor
 from src.model_client import AnswerApiClient
-from src.grading_client import GradingClient
+from src.grading_client import VerilogAGradingClient
 
-class Evaluator:
+class VerilogAEvaluator:
     def __init__(self, config: Config):
         self.config = config
         self.prompts = self._load_prompts()
@@ -20,37 +20,39 @@ class Evaluator:
         # 初始化回答模型客户端
         self.answer_api_client = AnswerApiClient(config)
             
-        # 初始化评分模型客户端
-        self.grading_client = GradingClient(config)
+        # 使用新的Verilog-A评分客户端
+        self.grading_client = VerilogAGradingClient(config)
         self.grading_client.prompts = self.prompts
         
-        # 初始化统计数据结构
-        self.results_stats = {  # Only save statistics, not full results
+        # 初始化统计数据结构 - 适配Verilog-A评估
+        self.results_stats = {
             "total_samples": 0,
             "successful_samples": 0,
             "failed_samples": 0,
             "scores_by_prompt": {},
             "errors": [],
-            # 累积指标
-            "metrics_accumulation": {
-                "precision": 0,
-                "recall": 0,
-                "f1": 0,
-                "conn_ratio": 0,
-                "perfect_match": 0
-            },
-            # 平均指标
-            "metrics_average": {}
+            # Verilog-A特定的累积指标
+            "verilog_a_metrics": {
+                "total_component_score": 0.0,
+                "total_connection_score": 0.0,
+                "total_score": 0.0,
+                "total_correct_components": 0,
+                "total_correct_connections": 0,
+                "total_generated_components": 0,
+                "total_reference_components": 0,
+                "total_generated_connections": 0,
+                "total_reference_connections": 0
+            }
         }
         
-        self.individual_results = {}  # 临时存储单个图像结果
-        self.results = []  # 保存所有结果
-        self.file_locks = {}  # 文件锁字典
+        self.individual_results = {}
+        self.results = []
+        self.file_locks = {}
         
         # 验证和设置要使用的提示键
         if not self.config.prompt_keys:
             self.config.prompt_keys = [k for k in self.prompts.keys() 
-                                    if not k.startswith("grading_prompt")]
+                                    if not k.startswith("verilog_a_grading_prompt")]
         else:
             for key in self.config.prompt_keys:
                 if key not in self.prompts:
@@ -60,7 +62,6 @@ class Evaluator:
         for key in self.config.prompt_keys:
             self.results_stats["scores_by_prompt"][key] = []
 
-    
     def _load_prompts(self) -> Dict[str, str]:
         """Load prompts from file"""
         try:
@@ -83,7 +84,7 @@ class Evaluator:
             return data
         except Exception as e:
             raise Exception(f"Failed to load JSONL data: {str(e)}")
-    
+
     async def _process_item_with_multiple_runs(self, session, item: Dict[str, Any], prompt_key: str) -> List[Dict[str, Any]]:
         """Process a single item with the specified prompt multiple times"""
         results = []
@@ -103,6 +104,8 @@ class Evaluator:
                 "prompt_key": prompt_key,
                 "run_id": 0
             }
+            self.results_stats["failed_samples"] += 1
+            self.results_stats["errors"].append(error_result)
             return [error_result]
         
         # Encode image (only need to do this once)
@@ -119,11 +122,13 @@ class Evaluator:
                 "prompt_key": prompt_key,
                 "run_id": 0
             }
+            self.results_stats["failed_samples"] += 1
+            self.results_stats["errors"].append(error_result)
             return [error_result]
         
         # Execute multiple runs
         run_results = []
-        metrics_history = []  # 收集所有运行的指标
+        has_successful_run = False
         
         for run_id in range(self.config.runs_per_prompt):
             try:
@@ -158,7 +163,7 @@ class Evaluator:
                     })
                     continue
                 
-                # Start grading task asynchronously
+                # Start Verilog-A grading task
                 grading_task = asyncio.create_task(
                     self.grading_client.grade(
                         session,
@@ -168,10 +173,7 @@ class Evaluator:
                     )
                 )
                 
-                # We can continue with other tasks while grading happens in background
-                # For simplicity in this implementation, we'll still wait for the result
-                
-                # Wait for grading to complete when needed
+                # Wait for grading to complete
                 grading_result = await grading_task
                 grade_time = grading_result.get("latency", 0)
                 
@@ -181,29 +183,55 @@ class Evaluator:
                 if "latency" not in grading_result:
                     grading_result["latency"] = grade_time
                 
-                # Get score and add to metrics history
+                # Check if grading was successful
+                if "error" in grading_result:
+                    error_result = {
+                        "error": f"Grading error: {grading_result.get('error', '')}",
+                        "item": {
+                            "img": item["img"],
+                            "img_folder": item["img_folder"]
+                        },
+                        "prompt_key": prompt_key,
+                        "run_id": run_id
+                    }
+                    results.append(error_result)
+                    self.results_stats["errors"].append(error_result)
+                    
+                    # Add to run results
+                    run_results.append({
+                        "run_id": run_id,
+                        "error": grading_result.get('error', ''),
+                        "timestamp": time.time()
+                    })
+                    continue
+                
+                # Get score and Verilog-A analysis
                 score = grading_result.get("score", 0)
-                metrics = grading_result.get("connection_analysis", {}).get("metrics", {})
+                verilog_a_analysis = grading_result.get("verilog_a_analysis", {})
                 
-                # 提取指标
-                precision = metrics.get("precision", 0)
-                recall = metrics.get("recall", 0)
-                f1_score = metrics.get("f1", 0)
-                conn_ratio = metrics.get("conn_ratio", 0)
-                perfect_match = int(metrics.get("perfect_match", 0))
+                # Mark as successful run
+                has_successful_run = True
                 
-                # 保存指标历史
-                metrics_history.append({
-                    "precision": precision,
-                    "recall": recall,
-                    "f1": f1_score,
-                    "conn_ratio": conn_ratio,
-                    "perfect_match": perfect_match
-                })
-                
-                for key in self.results_stats["metrics_accumulation"].keys():
-                    if key in metrics:
-                        self.results_stats["metrics_accumulation"][key] += metrics[key]
+                # 累积Verilog-A指标
+                if verilog_a_analysis and "scoring" in verilog_a_analysis:
+                    scoring = verilog_a_analysis["scoring"]
+                    component_analysis = verilog_a_analysis.get("component_analysis", {})
+                    connection_analysis = verilog_a_analysis.get("connection_analysis", {})
+                    
+                    # 累积分数
+                    self.results_stats["verilog_a_metrics"]["total_component_score"] += scoring.get("component_score", 0)
+                    self.results_stats["verilog_a_metrics"]["total_connection_score"] += scoring.get("connection_score", 0)
+                    self.results_stats["verilog_a_metrics"]["total_score"] += scoring.get("total_score", 0)
+                    
+                    # 累积组件统计
+                    self.results_stats["verilog_a_metrics"]["total_correct_components"] += len(component_analysis.get("correct_components", []))
+                    self.results_stats["verilog_a_metrics"]["total_generated_components"] += component_analysis.get("total_generated_components", 0)
+                    self.results_stats["verilog_a_metrics"]["total_reference_components"] += component_analysis.get("total_reference_components", 0)
+                    
+                    # 累积连接统计
+                    self.results_stats["verilog_a_metrics"]["total_correct_connections"] += len(connection_analysis.get("correct_connections", []))
+                    self.results_stats["verilog_a_metrics"]["total_generated_connections"] += connection_analysis.get("total_generated_connections", 0)
+                    self.results_stats["verilog_a_metrics"]["total_reference_connections"] += connection_analysis.get("total_reference_connections", 0)
                 
                 # 更新token使用量
                 if "usage" not in grading_result:
@@ -233,7 +261,7 @@ class Evaluator:
                         "score": score,
                         "usage": grading_result.get("usage", {}),
                         "latency": grading_result.get("latency", grade_time),
-                        "connection_analysis": grading_result.get("connection_analysis", {})
+                        "verilog_a_analysis": verilog_a_analysis
                     },
                     "reference": item["answer"],
                     "timestamp": time.time(),
@@ -246,28 +274,7 @@ class Evaluator:
                     "generation": llm_result["content"],
                     "score": score,
                     "grading_feedback": grading_result.get("content", ""),
-                    "connection_analysis": grading_result.get("connection_analysis", {
-                        "gen_connections": [],
-                        "ref_connections": [],
-                        "comparison": {
-                            "exact_match_count": 0,
-                            "total_ref": 0,
-                            "total_gen": 0,
-                            "precision": 0,
-                            "recall": 0
-                        },
-                        "semantic_matches": [],
-                        "total_matches": 0,
-                        "metrics": {
-                            "precision": 0,
-                            "recall": 0,
-                            "f1": 0,
-                            "conn_ratio": 0,
-                            "perfect_match": 0
-                        },
-                        "final_unmatched_gen": [],
-                        "final_unmatched_ref": []
-                    }),
+                    "verilog_a_analysis": verilog_a_analysis,
                     "latency": {
                         "generation": llm_time,
                         "grading": grade_time,
@@ -316,31 +323,34 @@ class Evaluator:
                     "timestamp": time.time()
                 })
         
-        # Use synchronization lock to save individual image results, ensuring we don't overwrite results from other prompts
+        # Update sample statistics after all runs
+        if has_successful_run:
+            self.results_stats["successful_samples"] += 1
+        else:
+            self.results_stats["failed_samples"] += 1
+        
+        # Save individual image results
         if self.config.save_individual:
             try:
                 # Ensure output directory exists
                 os.makedirs(self.config.output_dir, exist_ok=True)
                 
-                # 提取最后一次运行的指标用于文件名
-                if metrics_history:
-                    last_metrics = metrics_history[-1]
-                    precision = last_metrics.get("precision", 0)
-                    recall = last_metrics.get("recall", 0)
-                    f1_score = last_metrics.get("f1", 0)
-                    conn_ratio = last_metrics.get("conn_ratio", 0)
-                    perfect_match = int(last_metrics.get("perfect_match", 0))
+                # 生成包含Verilog-A分数的文件名
+                if run_results and "verilog_a_analysis" in run_results[-1] and not "error" in run_results[-1]:
+                    last_analysis = run_results[-1]["verilog_a_analysis"]
+                    scoring = last_analysis.get("scoring", {})
+                    comp_score = scoring.get("component_score", 0)
+                    conn_score = scoring.get("connection_score", 0)
+                    total_score = scoring.get("total_score", 0)
                     
-                    # 将指标值格式化为文件名（保留两位小数）
-                    metrics_str = f"p_{precision:.2f}_r_{recall:.2f}_f1_{f1_score:.2f}_cr_{conn_ratio:.2f}_pm_{perfect_match}"
+                    metrics_str = f"comp_{comp_score:.1f}_conn_{conn_score:.1f}_total_{total_score:.0f}"
                 else:
-                    metrics_str = "p_0.00_r_0.00_f1_0.00_cr_0.00_pm_0"
+                    metrics_str = "comp_0.0_conn_0.0_total_0"
                 
                 # 创建文件名
-                img_name = item["img"]  # 只使用图像文件名，不包含文件夹
+                img_name = os.path.splitext(item["img"])[0]  # Remove file extension
                 result_file = os.path.join(self.config.output_dir, f"{img_name}_{prompt_key}_{metrics_str}.json")
 
-                
                 # Use lock to get access
                 if result_file not in self.file_locks:
                     self.file_locks[result_file] = asyncio.Lock()
@@ -363,8 +373,7 @@ class Evaluator:
                                 "path": img_key,
                                 "file": item["img"],
                                 "folder": item["img_folder"],
-                                "tag": item.get("tag", ""),
-                                "metrics_history": metrics_history  # 存储指标历史
+                                "tag": item.get("tag", "")
                             },
                             "reference": item["answer"],
                             "results": {}
@@ -374,7 +383,7 @@ class Evaluator:
                     if "results" not in current_img_results:
                         current_img_results["results"] = {}
                         
-                    # Add results for current prompt, preserving existing results for other prompts
+                    # Add results for current prompt
                     current_img_results["results"][prompt_key] = run_results
                     current_img_results["last_updated"] = time.time()
                     
@@ -387,276 +396,170 @@ class Evaluator:
         
         return results
 
-    async def run(self) -> None:
-        """Run evaluation - process samples sequentially"""
-        data = self._load_jsonl()
-        print(f"Loaded {len(data)} items for evaluation")
-        print(f"Using these prompt keys: {self.config.prompt_keys}")
-        print(f"Each prompt will run {self.config.runs_per_prompt} times")
-        
-        # If individual results need to be saved, ensure output directory exists
-        if self.config.save_individual and not os.path.exists(self.config.output_dir):
-            os.makedirs(self.config.output_dir, exist_ok=True)
-        
-        # Initialize performance statistics dictionary
-        stats = {
-            "start_time": time.time(),
-            "total_samples": 0,
-            "successful_samples": 0,
-            "failed_samples": 0,
-            "total_inference_time": 0,
-            "total_grading_time": 0,
-            "scores": [],
-            "recent_scores": [],
-            "recent_inference_times": [],
-            "recent_grading_times": []
-        }
-        
-        # Calculate total tasks
-        total_tasks = len(data) * len(self.config.prompt_keys) * self.config.runs_per_prompt
-        
-        # Create progress bar
-        progress_bar = tqdm(total=total_tasks, desc="Evaluation Progress")
-        
-        async with aiohttp.ClientSession() as session:
-            # Limit concurrency
-            semaphore = asyncio.Semaphore(self.config.num_workers)
+    def update_progress_bar_verilog_a(self, progress_bar, stats):
+        """Update progress bar with Verilog-A specific metrics"""
+        if self.results_stats["successful_samples"] > 0:
+            # 计算当前指标平均值
+            successful_count = self.results_stats["successful_samples"]
+            verilog_metrics = self.results_stats["verilog_a_metrics"]
             
-            # Flag for periodic summary updates
-            last_summary_time = time.time()
-            summary_interval = 300  # Update summary every 5 minutes
+            avg_total_score = verilog_metrics["total_score"] / successful_count
+            avg_comp_score = verilog_metrics["total_component_score"] / successful_count
+            avg_conn_score = verilog_metrics["total_connection_score"] / successful_count
             
-            # Process each sample sequentially
-            for i, item in enumerate(data):
-                # At this level we can process different prompts concurrently
-                async def process_prompt(prompt_key):
-                    async with semaphore:
-                        results = await self._process_item_with_multiple_runs(session, item, prompt_key)
-                        
-                        # Update performance statistics
-                        for result in results:
-                            stats["total_samples"] += 1
-                            
-                            if "error" not in result:
-                                stats["successful_samples"] += 1
-                                self.results_stats["successful_samples"] += 1
-                                
-                                # Collect times and scores
-                                inference_time = result.get("generation", {}).get("latency", 0)
-                                grading_time = result.get("grading", {}).get("latency", 0)
-                                score = result.get("grading", {}).get("score", 0)
-                                
-                                stats["total_inference_time"] += inference_time
-                                stats["total_grading_time"] += grading_time
-                                stats["scores"].append(score)
-                                
-                                # Keep recent statistics
-                                stats["recent_inference_times"].append(inference_time)
-                                if len(stats["recent_inference_times"]) > 5:
-                                    stats["recent_inference_times"].pop(0)
-                                    
-                                stats["recent_grading_times"].append(grading_time)
-                                if len(stats["recent_grading_times"]) > 5:
-                                    stats["recent_grading_times"].pop(0)
-                                    
-                                stats["recent_scores"].append(score)
-                                if len(stats["recent_scores"]) > 5:
-                                    stats["recent_scores"].pop(0)
-                            else:
-                                stats["failed_samples"] += 1
-                                self.results_stats["failed_samples"] += 1
-                        
-                        # Update progress bar
-                        
-                        
-                        # 更新进度bar的部分
-                        if self.results_stats["successful_samples"] > 0:
-                            # 计算当前指标平均值
-                            current_metrics = {}
-                            for key, value in self.results_stats["metrics_accumulation"].items():
-                                current_metrics[key] = value / self.results_stats["successful_samples"]
-                            
-                            # 计算其他统计信息
-                            elapsed = time.time() - stats["start_time"]
-                            avg_score = sum(stats["scores"]) / len(stats["scores"]) if stats["scores"] else 0
-                            recent_avg_score = sum(stats["recent_scores"]) / len(stats["recent_scores"]) if stats["recent_scores"] else 0
-                            samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
-                            avg_inference = stats["total_inference_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
-                            avg_grading = stats["total_grading_time"] / stats["successful_samples"] if stats["successful_samples"] > 0 else 0
-                            recent_avg_inference = sum(stats["recent_inference_times"]) / len(stats["recent_inference_times"]) if stats["recent_inference_times"] else 0
-                            recent_avg_grading = sum(stats["recent_grading_times"]) / len(stats["recent_grading_times"]) if stats["recent_grading_times"] else 0
-                            
-                            progress_desc = (
-                                f"Completed: {stats['total_samples']}/{total_tasks} | "
-                                f"Score: {avg_score:.1f} | F1: {current_metrics.get('f1', 0):.2f} | "
-                                f"P: {current_metrics.get('precision', 0):.2f} | R: {current_metrics.get('recall', 0):.2f} | "
-                                f"Time: {avg_inference+avg_grading:.1f}s | {samples_per_second:.2f}/sec"
-                            )
-                            progress_bar.set_description(progress_desc)
-                            progress_bar.update(len(results))
-                        
-                        return results
-                
-                # Create tasks for each prompt
-                prompt_tasks = [process_prompt(prompt_key) for prompt_key in self.config.prompt_keys]
-                
-                # Run all prompt tasks for the current sample concurrently
-                await asyncio.gather(*prompt_tasks)
-                
-                # Periodically update summary file
-                current_time = time.time()
-                if current_time - last_summary_time > summary_interval:
-                    self._update_summary()
-                    last_summary_time = current_time
-                    
-                # Force garbage collection every 10 samples
-                if i % 10 == 0:
-                    import gc
-                    gc.collect()
+            # 计算其他统计信息
+            elapsed = time.time() - stats["start_time"]
+            samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
             
-            progress_bar.close()
-            
-        # Final summary update
-        self._update_summary()
-        
-        
-    def calculate_metrics_average(self):
-        """Calculate average metrics from accumulated values"""
-        successful_count = self.results_stats["successful_samples"]
-        if successful_count > 0:
-            self.results_stats["metrics_average"] = {
-                key: round(value / successful_count, 4)
-                for key, value in self.results_stats["metrics_accumulation"].items()
-            }
+            progress_desc = (
+                f"Completed: {stats['total_samples']} | "
+                f"Total: {avg_total_score:.1f}/100 | Comp: {avg_comp_score:.1f}/50 | "
+                f"Conn: {avg_conn_score:.1f}/50 | {samples_per_second:.2f}/s"
+            )
+            progress_bar.set_description(progress_desc)
         else:
-            self.results_stats["metrics_average"] = {
-                key: 0.0 for key in self.results_stats["metrics_accumulation"].keys()
-            }
+            # Show basic info if no successful samples yet
+            elapsed = time.time() - stats["start_time"]
+            samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
+            
+            progress_desc = (
+                f"Completed: {stats['total_samples']} | "
+                f"Processing... | {samples_per_second:.2f}/s"
+            )
+            progress_bar.set_description(progress_desc)
 
+    def calculate_verilog_a_metrics_average(self) -> Dict[str, float]:
+        """Calculate average Verilog-A metrics"""
+        if self.results_stats["successful_samples"] == 0:
+            return {
+                "average_component_score": 0.0,
+                "average_connection_score": 0.0,
+                "average_total_score": 0.0
+            }
+        
+        successful_count = self.results_stats["successful_samples"]
+        verilog_metrics = self.results_stats["verilog_a_metrics"]
+        
+        return {
+            "average_component_score": verilog_metrics["total_component_score"] / successful_count,
+            "average_connection_score": verilog_metrics["total_connection_score"] / successful_count,
+            "average_total_score": verilog_metrics["total_score"] / successful_count
+        }
 
     def _update_summary(self):
-        """Update summary file, saving only key statistics"""
+        """Update the summary file with current results"""
         try:
-            # 确保输出目录存在
+            # Ensure output directory exists
             os.makedirs(self.config.output_dir, exist_ok=True)
             
-            # 计算最新的指标平均值
-            self.calculate_metrics_average()
-            
-            # 计算统计信息，为每个prompt
-            prompt_stats = {}
-            for prompt_key, scores in self.results_stats["scores_by_prompt"].items():
-                if scores:
-                    prompt_stats[prompt_key] = {
-                        "samples": len(scores),
-                        "average_score": statistics.mean(scores),
-                        "median_score": statistics.median(scores) if len(scores) > 0 else 0,
-                        "min_score": min(scores) if scores else 0,
-                        "max_score": max(scores) if scores else 0,
-                        "std_dev": statistics.stdev(scores) if len(scores) > 1 else 0
-                    }
-            
-            # 计算总体统计信息
+            # Calculate overall statistics
             all_scores = []
             for scores in self.results_stats["scores_by_prompt"].values():
                 all_scores.extend(scores)
-                
-            # 分数分布
-            bins = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"]
-            score_distribution = {bin_range: 0 for bin_range in bins}
             
-            for score in all_scores:
-                for i, bin_range in enumerate(bins):
-                    lower = i * 10
-                    upper = (i + 1) * 10
-                    if lower <= score < upper or (score == 100 and upper == 100):
-                        score_distribution[bin_range] += 1
-                        break
-                        
-            # 整体统计
-            stats = {
-                "total_samples": self.results_stats["total_samples"],
-                "valid_samples": self.results_stats["successful_samples"],
-                "error_samples": self.results_stats["failed_samples"],
-                "unique_images": len(set(r["item"]["img"] for r in self.results if "item" in r and "img" in r["item"])),
-                "average_score": statistics.mean(all_scores) if all_scores else 0,
-                "median_score": statistics.median(all_scores) if all_scores else 0,
-                "min_score": min(all_scores) if all_scores else 0,
-                "max_score": max(all_scores) if all_scores else 0,
-                "std_dev": statistics.stdev(all_scores) if len(all_scores) > 1 else 0
-            }
+            # Calculate Verilog-A average metrics
+            verilog_a_averages = self.calculate_verilog_a_metrics_average()
             
-            # 简化错误信息
-            simplified_errors = []
-            for error in self.results_stats["errors"][-20:]:  # 只保留最近的20个错误
-                error_info = {
-                    "prompt_key": error.get("prompt_key", "unknown"),
-                    "error": error.get("error", "")[:200]  # 截断错误信息
-                }
-                
-                # 安全获取图像信息
-                if "item" in error:
-                    if isinstance(error["item"], dict):
-                        error_info["img"] = error["item"].get("img", "unknown")
-                    else:
-                        error_info["img"] = str(error["item"])
-                else:
-                    error_info["img"] = "unknown"
-                    
-                simplified_errors.append(error_info)
-            
-            # 准备汇总数据
+            # Create summary data
             summary_data = {
-                "config": {k: v for k, v in asdict(self.config).items() if k != 'grading_api_key'},
-                "analysis": {
-                    "stats": stats,
-                    "score_distribution": score_distribution,
-                    "prompt_stats": prompt_stats,
-                    "recent_errors": simplified_errors,
-                    # 添加平均指标
-                    "metrics_average": self.results_stats["metrics_average"]
+                "evaluation_config": asdict(self.config),
+                "statistics": {
+                    "total_samples": self.results_stats["total_samples"],
+                    "successful_samples": self.results_stats["successful_samples"],
+                    "failed_samples": self.results_stats["failed_samples"],
+                    "success_rate": (self.results_stats["successful_samples"] / self.results_stats["total_samples"]) * 100 if self.results_stats["total_samples"] > 0 else 0,
+                    "overall_average_score": statistics.mean(all_scores) if all_scores else 0,
+                    "overall_median_score": statistics.median(all_scores) if all_scores else 0,
+                    "overall_std_score": statistics.stdev(all_scores) if len(all_scores) > 1 else 0,
                 },
-                "performance": {
-                    "average_tokens_per_request": sum(r.get("generation", {}).get("usage", {}).get("total_tokens", 0) for r in self.results) / len(self.results) if self.results else 0,
-                    "total_tokens_used": sum(r.get("generation", {}).get("usage", {}).get("total_tokens", 0) for r in self.results),
-                    "average_latency": sum(r.get("total_processing_time", 0) for r in self.results) / len(self.results) if self.results else 0,
-                    "total_processing_time": sum(r.get("total_processing_time", 0) for r in self.results),
+                "verilog_a_metrics": {
+                    **verilog_a_averages,
+                    "cumulative_metrics": self.results_stats["verilog_a_metrics"]
                 },
-                "timestamp": time.time()
+                "scores_by_prompt": {},
+                "errors": self.results_stats["errors"],
+                "last_updated": time.time()
             }
             
-            # 保存汇总文件
+            # Calculate statistics for each prompt
+            for prompt_key, scores in self.results_stats["scores_by_prompt"].items():
+                if scores:
+                    summary_data["scores_by_prompt"][prompt_key] = {
+                        "count": len(scores),
+                        "average": statistics.mean(scores),
+                        "median": statistics.median(scores),
+                        "std": statistics.stdev(scores) if len(scores) > 1 else 0,
+                        "min": min(scores),
+                        "max": max(scores)
+                    }
+                else:
+                    summary_data["scores_by_prompt"][prompt_key] = {
+                        "count": 0,
+                        "average": 0,
+                        "median": 0,
+                        "std": 0,
+                        "min": 0,
+                        "max": 0
+                    }
+            
+            # Save summary file
             summary_path = os.path.join(self.config.output_dir, self.config.summary_name)
             with open(summary_path, 'w', encoding='utf-8') as f:
                 json.dump(summary_data, f, ensure_ascii=False, indent=2)
-                    
+                
         except Exception as e:
             import traceback
             print(f"Error updating summary file: {str(e)}\n{traceback.format_exc()}")
-            
-            
-    def save_metrics_summary(self):
-        """Save a separate metrics summary file for visualization tools"""
-        metrics_path = os.path.join(self.config.output_dir, "metrics.json")
+
+    def save_verilog_a_metrics_summary(self):
+        """Save Verilog-A specific metrics summary"""
+        metrics_path = os.path.join(self.config.output_dir, "verilog_a_metrics.json")
         
         # 收集所有样本的详细指标
         sample_metrics = []
         for result in self.results:
-            if "grading" in result and "connection_analysis" in result["grading"] and "metrics" in result["grading"]["connection_analysis"]:
-                metrics = result["grading"]["connection_analysis"]["metrics"]
+            if "grading" in result and "verilog_a_analysis" in result["grading"]:
+                analysis = result["grading"]["verilog_a_analysis"]
+                scoring = analysis.get("scoring", {})
+                component_analysis = analysis.get("component_analysis", {})
+                connection_analysis = analysis.get("connection_analysis", {})
+                
                 sample_metrics.append({
                     "file": result["item"]["img"],
-                    "precision": metrics.get("precision", 0),
-                    "recall": metrics.get("recall", 0),
-                    "f1": metrics.get("f1", 0),
-                    "conn_ratio": metrics.get("conn_ratio", 0),
-                    "perfect_match": metrics.get("perfect_match", 0),
+                    "component_score": scoring.get("component_score", 0),
+                    "connection_score": scoring.get("connection_score", 0),
+                    "total_score": scoring.get("total_score", 0),
+                    "correct_components": len(component_analysis.get("correct_components", [])),
+                    "generated_components": component_analysis.get("total_generated_components", 0),
+                    "reference_components": component_analysis.get("total_reference_components", 0),
+                    "correct_connections": len(connection_analysis.get("correct_connections", [])),
+                    "generated_connections": connection_analysis.get("total_generated_connections", 0),
+                    "reference_connections": connection_analysis.get("total_reference_connections", 0),
                     "prompt": result["prompt_key"]
                 })
         
+        # 计算总体指标
+        if self.results_stats["successful_samples"] > 0:
+            successful_count = self.results_stats["successful_samples"]
+            verilog_metrics = self.results_stats["verilog_a_metrics"]
+            
+            overall_metrics = {
+                "average_component_score": verilog_metrics["total_component_score"] / successful_count,
+                "average_connection_score": verilog_metrics["total_connection_score"] / successful_count,
+                "average_total_score": verilog_metrics["total_score"] / successful_count,
+                "total_correct_components": verilog_metrics["total_correct_components"],
+                "total_generated_components": verilog_metrics["total_generated_components"],
+                "total_reference_components": verilog_metrics["total_reference_components"],
+                "total_correct_connections": verilog_metrics["total_correct_connections"],
+                "total_generated_connections": verilog_metrics["total_generated_connections"],
+                "total_reference_connections": verilog_metrics["total_reference_connections"]
+            }
+        else:
+            overall_metrics = {}
+        
         # 生成汇总数据
         metrics_data = {
-            "averages": self.results_stats["metrics_average"],
+            "overall": overall_metrics,
             "samples": sample_metrics,
             "prompt_metrics": {}
         }
@@ -666,43 +569,35 @@ class Evaluator:
             prompt_results = [r for r in sample_metrics if r["prompt"] == prompt_key]
             if prompt_results:
                 metrics_data["prompt_metrics"][prompt_key] = {
-                    "precision": sum(r["precision"] for r in prompt_results) / len(prompt_results),
-                    "recall": sum(r["recall"] for r in prompt_results) / len(prompt_results),
-                    "f1": sum(r["f1"] for r in prompt_results) / len(prompt_results),
-                    "conn_ratio": sum(r["conn_ratio"] for r in prompt_results) / len(prompt_results),
-                    "perfect_match": sum(r["perfect_match"] for r in prompt_results) / len(prompt_results)
+                    "average_component_score": sum(r["component_score"] for r in prompt_results) / len(prompt_results),
+                    "average_connection_score": sum(r["connection_score"] for r in prompt_results) / len(prompt_results),
+                    "average_total_score": sum(r["total_score"] for r in prompt_results) / len(prompt_results),
+                    "total_samples": len(prompt_results)
                 }
         
         # 保存指标文件
         try:
             with open(metrics_path, 'w', encoding='utf-8') as f:
                 json.dump(metrics_data, f, ensure_ascii=False, indent=2)
-            print(f"Detailed metrics saved to: {metrics_path}")
         except Exception as e:
-            print(f"Error saving metrics summary: {str(e)}")
+            print(f"Error saving Verilog-A metrics summary: {str(e)}")
 
-
-
-    
     def save_results(self):
-        """Final results saving - now only updates final summary and outputs statistics"""
-        # 计算最新的指标平均值
-        self.calculate_metrics_average()
-        
+        """Final results saving with Verilog-A specific metrics"""
         # 更新总结文件
         self._update_summary()
         
-        # 保存详细指标
-        self.save_metrics_summary()
+        # 保存详细的Verilog-A指标
+        self.save_verilog_a_metrics_summary()
         
         # 计算实际保存的文件数
         saved_files = 0
         if os.path.exists(self.config.output_dir):
             saved_files = len([f for f in os.listdir(self.config.output_dir) 
-                            if f.endswith('.json') and f != self.config.summary_name and f != 'metrics.json'])
+                            if f.endswith('.json') and f != self.config.summary_name and f != 'verilog_a_metrics.json'])
         
         print(f"Summary results saved to: {os.path.join(self.config.output_dir, self.config.summary_name)}")
-        print(f"Detailed metrics saved to: {os.path.join(self.config.output_dir, 'metrics.json')}")
+        print(f"Detailed Verilog-A metrics saved to: {os.path.join(self.config.output_dir, 'verilog_a_metrics.json')}")
         print(f"Saved {saved_files} individual image results to {self.config.output_dir} directory")
         
         # 分析总结并打印
@@ -711,60 +606,98 @@ class Evaluator:
             all_scores.extend(scores)
                 
         if self.config.verbose and all_scores:
-            # 原有评估结果摘要
+            # Verilog-A评估结果摘要
             print("\n" + "="*50)
-            print(" "*15 + "EVALUATION RESULTS SUMMARY")
+            print(" "*15 + "VERILOG-A EVALUATION RESULTS SUMMARY")
             print("="*50)
             print(f"Total samples: {self.results_stats['successful_samples'] + self.results_stats['failed_samples']}")
             print(f"Valid samples: {self.results_stats['successful_samples']}")
             print(f"Error samples: {self.results_stats['failed_samples']}")
-            print(f"Overall average score: {statistics.mean(all_scores):.2f}")
+            print(f"Overall average score: {statistics.mean(all_scores):.2f}/100")
             
-            # 添加指标平均值输出
-            print("\n" + "="*50)
-            print(" "*15 + "CONNECTION METRICS SUMMARY")
-            print("="*50)
-            avg_metrics = self.results_stats["metrics_average"]
-            print(f"Precision (P): {avg_metrics.get('precision', 0):.4f}")
-            print(f"Recall (R): {avg_metrics.get('recall', 0):.4f}")
-            print(f"F1 Score: {avg_metrics.get('f1', 0):.4f}")
-            print(f"Connection Ratio (CR): {avg_metrics.get('conn_ratio', 0):.4f}")
-            print(f"Perfect Match Rate (PM): {avg_metrics.get('perfect_match', 0):.4f} ({int(avg_metrics.get('perfect_match', 0)*100)}%)")
-            
-            # 指标解释
-            print("\n" + "="*50)
-            print(" "*15 + "METRICS EXPLANATION")
-            print("="*50)
-            print("P (precision): Correct connections ÷ Total generated connections")
-            print("R (recall): Correct connections ÷ Total reference connections")
-            print("F1: Harmonic mean of precision and recall")
-            print("CR (conn_ratio): Total generated connections ÷ Total reference connections")
-            print("PM (perfect_match): Percentage of samples with F1=1 (perfect match)")
-            
-            # 分数分布
-            bins = ["0-10", "10-20", "20-30", "30-40", "40-50", "50-60", "60-70", "70-80", "80-90", "90-100"]
-            score_distribution = {bin_range: 0 for bin_range in bins}
-            
-            for score in all_scores:
-                for i, bin_range in enumerate(bins):
-                    lower = i * 10
-                    upper = (i + 1) * 10
-                    if lower <= score < upper or (score == 100 and upper == 100):
-                        score_distribution[bin_range] += 1
-                        break
-            
-            print("\n" + "="*50)
-            print(" "*15 + "SCORE DISTRIBUTION")
-            print("="*50)
-            for range_key, count in score_distribution.items():
-                print(f"{range_key}: {count} samples ({count/len(all_scores)*100:.1f}%)")
-            
-            print("\n" + "="*50)
-            print(" "*15 + "PROMPT STATISTICS")
-            print("="*50)
-            for prompt_key, scores in self.results_stats["scores_by_prompt"].items():
-                if scores:
-                    avg_score = statistics.mean(scores)
-                    print(f"{prompt_key}: Average score {avg_score:.2f} ({len(scores)} samples)")
-            
-            print("\n" + "="*50)
+            # 添加Verilog-A指标输出
+            if self.results_stats["successful_samples"] > 0:
+                print("\n" + "="*50)
+                print(" "*15 + "VERILOG-A METRICS SUMMARY")
+                print("="*50)
+                
+                successful_count = self.results_stats["successful_samples"]
+                verilog_metrics = self.results_stats["verilog_a_metrics"]
+                
+                avg_comp_score = verilog_metrics["total_component_score"] / successful_count
+                avg_conn_score = verilog_metrics["total_connection_score"] / successful_count
+                avg_total_score = verilog_metrics["total_score"] / successful_count
+                
+                print("Component Analysis:")
+                print(f"  Average Score: {avg_comp_score:.2f}/50")
+                print(f"  Total Correct Components: {verilog_metrics['total_correct_components']}")
+                print(f"  Total Generated Components: {verilog_metrics['total_generated_components']}")
+                print(f"  Total Reference Components: {verilog_metrics['total_reference_components']}")
+                
+                print("\nConnection Analysis:")
+                print(f"  Average Score: {avg_conn_score:.2f}/50")
+                print(f"  Total Correct Connections: {verilog_metrics['total_correct_connections']}")
+                print(f"  Total Generated Connections: {verilog_metrics['total_generated_connections']}")
+                print(f"  Total Reference Connections: {verilog_metrics['total_reference_connections']}")
+                
+                print(f"\nTotal Average Score: {avg_total_score:.2f}/100")
+
+    async def run(self):
+        """Main execution method"""
+        print(f"Loaded {len(self._load_jsonl())} items for evaluation")
+        print(f"Using these prompt keys: {self.config.prompt_keys}")
+        print(f"Each prompt will run {self.config.runs_per_prompt} times")
+        
+        # Load data
+        data = self._load_jsonl()
+        
+        # Calculate total samples to process
+        total_samples_to_process = len(data) * len(self.config.prompt_keys)
+        
+        # Initialize statistics
+        stats = {
+            "start_time": time.time(),
+            "total_samples": 0,
+            "errors": []
+        }
+        
+        # Create async session
+        timeout = aiohttp.ClientTimeout(total=600)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            # Initialize progress bar
+            with tqdm(total=total_samples_to_process, desc="Evaluation Progress") as progress_bar:
+                
+                # Process each item with each prompt
+                for item in data:
+                    for prompt_key in self.config.prompt_keys:
+                        try:
+                            # Process this item with this prompt
+                            item_results = await self._process_item_with_multiple_runs(session, item, prompt_key)
+                            
+                            # Update statistics
+                            stats["total_samples"] += 1
+                            self.results_stats["total_samples"] += 1
+                            
+                            # Update progress bar with Verilog-A metrics
+                            self.update_progress_bar_verilog_a(progress_bar, stats)
+                            progress_bar.update(1)
+                            
+                            # Save results periodically
+                            if stats["total_samples"] % 10 == 0:
+                                self._update_summary()
+                                
+                        except Exception as e:
+                            import traceback
+                            error_info = f"Error processing {item.get('img', 'unknown')} with {prompt_key}: {str(e)}\n{traceback.format_exc()}"
+                            print(f"\n{error_info}")
+                            
+                            stats["errors"].append(error_info)
+                            self.results_stats["failed_samples"] += 1
+                            self.results_stats["total_samples"] += 1
+                            
+                            # Update progress bar
+                            self.update_progress_bar_verilog_a(progress_bar, stats)
+                            progress_bar.update(1)
+        
+        # Save final results
+        self.save_results()

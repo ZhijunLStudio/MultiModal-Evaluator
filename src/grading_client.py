@@ -1,583 +1,514 @@
+import asyncio
+import json
 import time
 import re
-from typing import Dict, Any, List, Tuple, Set
+from typing import Dict, Any, List, Tuple, Optional
 import aiohttp
 from src.config import Config
-import json
 
-class GradingClient:
+class VerilogAGradingClient:
     def __init__(self, config: Config):
         self.config = config
-        self.api_base = config.grading_api_base
-        self.api_key = config.grading_api_key
-        self.model = config.grading_model
-        self.prompts = {}  # Will be set in Evaluator
-    
-
-
-    def _extract_node_name(self, node_text: str) -> str:
-        """Extract only the node name part from text that may include attributes."""
-        # 提取节点名称，忽略可能存在的属性标签
-        bracket_index = node_text.find('[')
-        if bracket_index != -1:
-            return node_text[:bracket_index].strip()
-        return node_text.strip()
-
-    def _clean_node_names(self, node_name: str) -> str:
-        """Clean node names by removing brackets, quotes, etc."""
-        if not isinstance(node_name, str):
-            return str(node_name)
+        self.prompts = {}
         
-        # 首先提取纯节点名称，去除属性标签
-        clean_name = self._extract_node_name(node_name)
+    def extract_verilog_modules(self, verilog_code: str) -> List[Dict[str, Any]]:
+        """Extract module definitions from Verilog-A code"""
+        modules = []
         
-        # 去除分号和其他潜在的分隔符
-        clean_name = clean_name.rstrip(';').strip()
+        # Remove comments and clean up code
+        cleaned_code = re.sub(r'//.*?\n', '\n', verilog_code)
+        cleaned_code = re.sub(r'/\*.*?\*/', '', cleaned_code, flags=re.DOTALL)
         
-        # 移除引号
-        if (clean_name.startswith('"') and clean_name.endswith('"')) or \
-        (clean_name.startswith("'") and clean_name.endswith("'")):
-            clean_name = clean_name[1:-1]
-        
-        return clean_name.strip()
-
-    def _extract_connections(self, text: str) -> List[Tuple[str, str, str]]:
-        """Extract connection relationships from text using regex.
-        Returns list of tuples (source, connection_type, target)
-        """
-        connections = []
-        
-        # 按行拆分文本，方便处理
-        lines = text.split('\n')
-        
-        for line in lines:
-            # 提取原始连接关系
-            
-            # 1. 提取箭头连接 (->)，使用更精确的模式来匹配节点名称
-            arrow_pattern = re.compile(r'(\w+(?:[-_]\w+)*)\s*->\s*(\w+(?:[-_]\w+)*(?:\[.*?\])?)')
-            arrow_matches = re.findall(arrow_pattern, line)
-            
-            for src, tgt in arrow_matches:
-                # 清理目标节点，移除可能的属性标签
-                clean_tgt = self._extract_node_name(tgt)
-                if src and clean_tgt:  # 确保都不为空
-                    connections.append((src.strip(), "->", clean_tgt.strip()))
-            
-            # 2. 提取双向连接 (<->)
-            bidirectional_pattern = re.compile(r'(\w+(?:[-_]\w+)*)\s*<->\s*(\w+(?:[-_]\w+)*(?:\[.*?\])?)')
-            bidir_matches = re.findall(bidirectional_pattern, line)
-            
-            for src, tgt in bidir_matches:
-                clean_tgt = self._extract_node_name(tgt)
-                if src and clean_tgt:
-                    connections.append((src.strip(), "<->", clean_tgt.strip()))
-            
-            # 3. 提取双连字符连接 (--)
-            double_dash_pattern = re.compile(r'(\w+(?:[-_]\w+)*)\s*--\s*(\w+(?:[-_]\w+)*(?:\[.*?\])?)')
-            double_dash_matches = re.findall(double_dash_pattern, line)
-            
-            for src, tgt in double_dash_matches:
-                clean_tgt = self._extract_node_name(tgt)
-                if src and clean_tgt:
-                    connections.append((src.strip(), "--", clean_tgt.strip()))
-        
-        # 移除重复连接
-        unique_connections = []
-        seen = set()
-        
-        for src, conn_type, tgt in connections:
-            # 去除末尾可能的分号
-            src = src.rstrip(';')
-            tgt = tgt.rstrip(';')
-            
-            connection_key = f"{src}|{conn_type}|{tgt}"
-            if connection_key not in seen:
-                seen.add(connection_key)
-                unique_connections.append((src, conn_type, tgt))
-        
-        return unique_connections
-
-
-
-
-
-    
-    def _format_connection(self, conn: Tuple[str, str, str]) -> str:
-        """Format connection tuple as string, preserving connection type"""
-        src = self._clean_node_names(conn[0])
-        tgt = self._clean_node_names(conn[2])
-        return f"{src} {conn[1]} {tgt}"
-
-
-    
-    def _compare_connections(self, gen_connections: List[Tuple[str, str, str]], 
-                            ref_connections: List[Tuple[str, str, str]]) -> Dict[str, Any]:
-        """Compare generated and reference connections using regex"""
-        # 创建连接的字符串表示集合，方便比较
-        gen_conn_set = set(self._format_connection(c) for c in gen_connections)
-        ref_conn_set = set(self._format_connection(c) for c in ref_connections)
-        
-        # 精确匹配的连接
-        exact_matches = gen_conn_set.intersection(ref_conn_set)
-        
-        # 生成中未匹配的连接
-        unmatched_gen = [conn for conn in gen_connections 
-                        if self._format_connection(conn) not in exact_matches]
-        
-        # 参考中未匹配的连接
-        unmatched_ref = [conn for conn in ref_connections 
-                        if self._format_connection(conn) not in exact_matches]
-        
-        # 计算精确匹配指标
-        precision = len(exact_matches) / len(gen_conn_set) if gen_conn_set else 0.0
-        recall = len(exact_matches) / len(ref_conn_set) if ref_conn_set else 0.0
-        
-        # 将结果打包成字典
-        result = {
-            "exact_matches": list(exact_matches),
-            "exact_match_count": len(exact_matches),
-            "unmatched_gen": [self._format_connection(c) for c in unmatched_gen],
-            "unmatched_ref": [self._format_connection(c) for c in unmatched_ref],
-            "total_gen": len(gen_connections),
-            "total_ref": len(ref_connections),
-            "precision": precision,
-            "recall": recall
-        }
-        
-        return result
-
-    
-    def _extract_semantic_matches(self, text: str) -> List[Dict[str, str]]:
-        """Extract semantic matches from grading model output in JSON format"""
-        matches = []
-        
-        # 1. First try to extract from JSON blocks
-        json_pattern = r'```(?:json)?\s*([\s\S]*?)\s*```'
-        json_matches = re.findall(json_pattern, text, re.DOTALL)
-        
-        if json_matches:
-            for i, json_text in enumerate(json_matches):
-                try:
-                    data = json.loads(json_text)
-                    if "semantic_matches" in data and isinstance(data["semantic_matches"], list):
-                        for match in data["semantic_matches"]:
-                            if isinstance(match, dict) and "generated" in match and "reference" in match:
-                                gen = self._clean_match_string(match["generated"])
-                                ref = self._clean_match_string(match["reference"])
-                                matches.append({"generated": gen, "reference": ref})
-                        
-                        if matches:
-                            return matches
-                except json.JSONDecodeError as e:
-                    # Only print in verbose mode and if this is the last JSON block
-                    if self.config.verbose and i == len(json_matches) - 1:
-                        print(f"JSON decode error in block {i+1}: {e}")
-                        print(f"JSON block sample: {json_text[:100]}...")
-                except Exception as e:
-                    if self.config.verbose and i == len(json_matches) - 1:
-                        print(f"Error processing JSON block {i+1}: {e}")
-        
-        # 2. Try parsing the entire text as JSON
-        try:
-            data = json.loads(text)
-            if "semantic_matches" in data and isinstance(data["semantic_matches"], list):
-                for match in data["semantic_matches"]:
-                    if isinstance(match, dict) and "generated" in match and "reference" in match:
-                        gen = self._clean_match_string(match["generated"])
-                        ref = self._clean_match_string(match["reference"])
-                        matches.append({"generated": gen, "reference": ref})
-                
-                if matches:
-                    return matches
-        except Exception:
-            pass
-        
-        # 3. Enhanced regex patterns to match more formats
-        patterns = [
-            # Original patterns
-            r'Generated:\s*([^=\n]+?)\s*=\s*Reference:\s*([^\n]+)',
-            r'`([^`]+)`\s*(?:is|are)?\s*equivalent to\s*`([^`]+)`',
-            r'\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|',
-            
-            # Additional patterns
-            r'Generated connection\s*[`"]([^`"]+)[`"]\s*matches reference\s*[`"]([^`"]+)[`"]',
-            r'([^=\n]+?)\s*=\s*semantically equivalent to\s*=>\s*([^\n]+)',
-            r'Generated:\s*"?([^"=\n]+?)"?\s*[=≈]\s*"?([^"\n]+)"?\s*(?:Reference|Ref)',
-            r'Generated\s*(?:connection)?(?::|->)?\s*["`]?([^"`\n]+)["`]?\s*(?:is matched to|is equivalent to|≈|=)\s*["`]?([^"`\n]+)["`]?(?:\s*in Reference)?',
-            r'(?:Pair|Match)\s*\d+:\s*([^=\n]+?)\s*(?:=|->|≈)\s*([^\n]+)',
-            r'"([^"]+)"\s*in generated\s*(?:matches|corresponds to|is equivalent to)\s*"([^"]+)"\s*in reference',
-            
-            # Simple patterns that might catch more cases
-            r'([^=\n,]+?)\s*=>\s*([^\n,]+)',  # Simple arrow pattern
-            r'([^=\n,]+?)\s*↔\s*([^\n,]+)',   # Unicode bidirectional arrow
-            
-            # Language-specific patterns
-            r'生成的\s*[`"]([^`"]+)[`"]\s*匹配参考\s*[`"]([^`"]+)[`"]',
-            r'生成:\s*"?([^"=\n]+?)"?\s*[=≈]\s*"?([^"\n]+)"?\s*参考'
-        ]
-        
-        for pattern in patterns:
-            pairs = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
-            for gen, ref in pairs:
-                gen_clean = self._clean_match_string(gen)
-                ref_clean = self._clean_match_string(ref)
-                if gen_clean and ref_clean:  # Ensure non-empty strings
-                    matches.append({"generated": gen_clean, "reference": ref_clean})
-            
-            if matches:  # If we found matches with this pattern, no need to try others
-                break
-        
-        # 4. Try to extract from bullet or numbered lists
-        if not matches:
-            list_patterns = [
-                r'[-*•]\s*Generated:\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*Reference:\s*[`"]?([^`"\n]+)[`"]?',
-                r'[-*•]\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*[`"]?([^`"\n]+)[`"]?',
-                r'\d+\.\s*Generated:\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*Reference:\s*[`"]?([^`"\n]+)[`"]?',
-                r'\d+\.\s*[`"]?([^`"=\n]+)[`"]?\s*[=≈]\s*[`"]?([^`"\n]+)[`"]?'
-            ]
-            
-            for pattern in list_patterns:
-                pairs = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
-                for gen, ref in pairs:
-                    gen_clean = self._clean_match_string(gen)
-                    ref_clean = self._clean_match_string(ref)
-                    if gen_clean and ref_clean:
-                        matches.append({"generated": gen_clean, "reference": ref_clean})
-                
-                if matches:
-                    break
-        
-        # 5. Try a very aggressive approach for tables and key-value structures
-        if not matches:
-            # Look for tables with | delimiters
-            table_pattern = r'\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|'
-            table_matches = re.findall(table_pattern, text)
-            for col1, col2 in table_matches:
-                # Try both orders as we don't know which column is gen vs ref
-                gen_clean = self._clean_match_string(col1)
-                ref_clean = self._clean_match_string(col2)
-                if gen_clean and ref_clean and "->" in gen_clean and "->" in ref_clean:
-                    matches.append({"generated": gen_clean, "reference": ref_clean})
-        
-        # 6. De-duplicate matches
-        unique_matches = []
-        seen_pairs = set()
+        # Find all module definitions - more flexible pattern
+        module_pattern = r'module\s+(\w+)(?:\s*#[^;]*?)?\s*\((.*?)\)\s*;(.*?)endmodule'
+        matches = re.finditer(module_pattern, cleaned_code, re.DOTALL | re.IGNORECASE)
         
         for match in matches:
-            pair_id = f"{match['generated']}|{match['reference']}"
-            if pair_id not in seen_pairs:
-                seen_pairs.add(pair_id)
-                unique_matches.append(match)
+            module_name = match.group(1).strip()
+            ports_str = match.group(2).strip()
+            body = match.group(3).strip()
+            
+            # Parse ports
+            ports = self.parse_ports(ports_str)
+            
+            modules.append({
+                "name": module_name,
+                "ports": ports,
+                "body": body
+            })
         
-        # Only print debug information if we failed to find any matches and it's not a score:0 case
-        if not unique_matches and self.config.verbose and "score: 0" not in text.lower():
-            print("\n----- EXTRACTION FAILED -----")
-            print(f"Failed to extract semantic matches from text:")
-            print(f"First 200 chars: {text[:200]}...")
-            print(f"Last 200 chars: ...{text[-200:]}")
-            print("----- END EXTRACTION DEBUG -----\n")
-        
-        return unique_matches
-
-
-
-
-
-
-    def _clean_match_string(self, text: str) -> str:
-        """Clean match string by removing quotes, asterisks, etc."""
-        # 移除引号、星号和转义字符等
-        cleaned = re.sub(r'[`*"\\]', '', text.strip())
-        # 移除开头结尾的空白字符
-        return cleaned.strip()
-
-
+        return modules
     
-    def _calculate_metrics(self, exact_matches: int, semantic_matches: int, 
-                        total_gen: int, total_ref: int) -> Dict[str, float]:
-        """Calculate evaluation metrics with F1 score and other ratios"""
-        # 确保总匹配数不会超过参考数量
-        total_matches = min(exact_matches + semantic_matches, total_ref)
+    def parse_ports(self, ports_str: str) -> List[Dict[str, str]]:
+        """Parse module ports with better flexibility"""
+        if not ports_str.strip():
+            return []
         
-        # 计算精确率和召回率
-        precision = total_matches / total_gen if total_gen > 0 else 0.0
-        recall = total_matches / total_ref if total_ref > 0 else 0.0
+        ports = []
+        # Split by comma but be careful with nested parentheses and brackets
+        port_items = re.split(r',(?![^()\[\]]*[\)\]])', ports_str)
         
-        # 计算F1分数
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        for item in port_items:
+            item = item.strip()
+            if not item:
+                continue
+                
+            # Match various port patterns:
+            # input wire [3:0] port_name
+            # input port_name  
+            # output real port_name
+            # inout [N-1:0] port_name
+            port_match = re.match(r'(input|output|inout)?\s*(?:wire|reg|real|logic|electrical)?\s*(?:\[[^\]]+\])?\s*(\w+)', item.strip())
+            if port_match:
+                direction = port_match.group(1) if port_match.group(1) else "inout"
+                name = port_match.group(2)
+                ports.append({
+                    "direction": direction,
+                    "name": name
+                })
         
-        # 连接完整性比率 - 生成的连接总数 ÷ 参考的连接总数
-        conn_ratio = total_gen / total_ref if total_ref > 0 else 0.0
+        return ports
+    
+    def extract_instantiations(self, verilog_code: str) -> List[Dict[str, Any]]:
+        """Extract module instantiations from Verilog-A code"""
+        instantiations = []
         
-        # 全对率 (F1为1的情况)
-        perfect_match = 1.0 if abs(f1 - 1.0) < 0.001 else 0.0
+        # Remove comments
+        cleaned_code = re.sub(r'//.*?\n', '\n', verilog_code)
+        cleaned_code = re.sub(r'/\*.*?\*/', '', cleaned_code, flags=re.DOTALL)
         
-        # 确保结果在[0,1]范围内，并保留两位小数
-        precision = round(min(1.0, max(0.0, precision)), 2)
-        recall = round(min(1.0, max(0.0, recall)), 2)
-        f1 = round(min(1.0, max(0.0, f1)), 2)
-        conn_ratio = round(conn_ratio, 2)
+        # Find instantiations pattern: MODULE_NAME #(...) instance_name ( .port(signal), ... );
+        # Handle parameterized modules too
+        inst_pattern = r'(\w+)\s*(?:#[^(]*?)?\s+(\w+)\s*\(\s*(.*?)\s*\)\s*;'
+        matches = re.finditer(inst_pattern, cleaned_code, re.DOTALL)
+        
+        for match in matches:
+            module_type = match.group(1).strip()
+            instance_name = match.group(2).strip()
+            connections_str = match.group(3).strip()
+            
+            # Skip if it's a declaration, not an instantiation
+            if module_type.lower() in ['electrical', 'integer', 'real', 'wire', 'reg', 'logic']:
+                continue
+                
+            # Skip built-in Verilog-A constructs
+            if module_type in ['V', 'I', 'idt', 'ddt', 'transition', 'cross']:
+                continue
+                
+            # Parse connections
+            connections = self.parse_connections(connections_str)
+            
+            instantiations.append({
+                "module_type": module_type,
+                "instance_name": instance_name,
+                "connections": connections
+            })
+        
+        return instantiations
+    
+    def parse_connections(self, connections_str: str) -> List[Dict[str, str]]:
+        """Parse port connections in instantiation"""
+        if not connections_str.strip():
+            return []
+        
+        connections = []
+        # Split by comma, handling nested parentheses
+        conn_items = re.split(r',(?![^()]*\))', connections_str)
+        
+        for item in conn_items:
+            item = item.strip()
+            if not item:
+                continue
+                
+            # Match .port(signal) pattern
+            conn_match = re.match(r'\.(\w+)\s*\(\s*(\w+)\s*\)', item)
+            if conn_match:
+                port = conn_match.group(1)
+                signal = conn_match.group(2)
+                connections.append({
+                    "port": port,
+                    "signal": signal
+                })
+        
+        return connections
+    
+    def normalize_module_name(self, name: str) -> str:
+        """Normalize module names for comparison"""
+        # Convert to lowercase and remove underscores/special chars for fuzzy matching
+        return re.sub(r'[_\-\s]+', '', name.lower())
+    
+    def find_similar_modules(self, target_name: str, module_list: List[Dict]) -> List[str]:
+        """Find modules with similar names"""
+        target_norm = self.normalize_module_name(target_name)
+        similar = []
+        
+        for module in module_list:
+            module_norm = self.normalize_module_name(module["name"])
+            
+            # Exact match after normalization
+            if target_norm == module_norm:
+                similar.append(module["name"])
+                continue
+                
+            # Check if one contains the other
+            if target_norm in module_norm or module_norm in target_norm:
+                similar.append(module["name"])
+                continue
+                
+            # Check for semantic similarity (common mappings)
+            mappings = {
+                'adder': ['summer', 'add', 'sum'],
+                'integrator': ['integration', 'int'],
+                'comparator': ['comparison', 'comp'],
+                'dac': ['digitaltoanalog', 'da'],
+                'filter': ['decimation', 'decim'],
+                'register': ['reg', 'ff', 'flipflop'],
+                'logic': ['log'],
+                'state': ['fsm', 'machine']
+            }
+            
+            for key, aliases in mappings.items():
+                if (key in target_norm and any(alias in module_norm for alias in aliases)) or \
+                   (key in module_norm and any(alias in target_norm for alias in aliases)):
+                    similar.append(module["name"])
+                    break
+        
+        return similar
+    
+    def compare_components(self, generated_modules: List[Dict], reference_modules: List[Dict]) -> Dict[str, Any]:
+        """Compare component modules between generated and reference code with fuzzy matching"""
+        
+        # Create lookup dictionaries
+        gen_modules = {mod["name"]: mod for mod in generated_modules}
+        ref_modules = {mod["name"]: mod for mod in reference_modules}
+        
+        correct_components = []
+        missing_components = []
+        extra_components = []
+        
+        # Check each reference module
+        for ref_name, ref_mod in ref_modules.items():
+            similar_modules = self.find_similar_modules(ref_name, generated_modules)
+            
+            if similar_modules:
+                # Found at least one similar module
+                best_match = similar_modules[0]  # Take the first/best match
+                gen_mod = gen_modules[best_match]
+                
+                # Check if ports are reasonably similar (more lenient)
+                if self.ports_reasonably_match(gen_mod["ports"], ref_mod["ports"]):
+                    correct_components.append(f"{ref_name} -> {best_match}")
+                else:
+                    correct_components.append(f"{ref_name} -> {best_match} (partial)")
+            else:
+                missing_components.append(ref_name)
+        
+        # Find extra components in generated code
+        matched_gen_modules = set()
+        for ref_name in ref_modules:
+            similar = self.find_similar_modules(ref_name, generated_modules)
+            matched_gen_modules.update(similar)
+        
+        for gen_name in gen_modules:
+            if gen_name not in matched_gen_modules:
+                extra_components.append(gen_name)
         
         return {
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "conn_ratio": conn_ratio,
-            "perfect_match": perfect_match
+            "correct_components": correct_components,
+            "missing_components": missing_components,
+            "extra_components": extra_components,
+            "total_generated_components": len(generated_modules),
+            "total_reference_components": len(reference_modules)
         }
-
     
-    async def grade(self, session, prompt: str, generated_answer: str, reference_answer: str) -> Dict[str, Any]:
-        """Call grading API to evaluate the generated answer with focus on connection relationships"""
-        # Select grading prompt based on language
-        grading_prompt_key = f"grading_prompt_{self.config.grading_lang}"
-        
-        if not self.prompts:
-            return {"error": "Grading prompts not set", "content": "", "score": 0, "usage": {}, "latency": 0}
-        
-        grading_prompt = self.prompts.get(grading_prompt_key)
-        if not grading_prompt:
-            return {"error": f"Grading prompt '{grading_prompt_key}' does not exist", "content": "", "score": 0, "usage": {}, "latency": 0}
+    def ports_reasonably_match(self, gen_ports: List[Dict], ref_ports: List[Dict]) -> bool:
+        """Check if port lists reasonably match (more lenient than exact match)"""
+        if len(gen_ports) == 0 and len(ref_ports) == 0:
+            return True
             
-        # 提取连接关系
-        gen_connections = self._extract_connections(generated_answer)
-        ref_connections = self._extract_connections(reference_answer)
+        # If both have ports, check for reasonable overlap
+        if len(gen_ports) > 0 and len(ref_ports) > 0:
+            gen_port_names = {self.normalize_module_name(p["name"]) for p in gen_ports}
+            ref_port_names = {self.normalize_module_name(p["name"]) for p in ref_ports}
+            
+            # At least 50% overlap is considered reasonable
+            overlap = len(gen_port_names.intersection(ref_port_names))
+            max_ports = max(len(gen_port_names), len(ref_port_names))
+            
+            return overlap / max_ports >= 0.3  # 30% overlap threshold
         
-        # 比较连接关系
-        comparison = self._compare_connections(gen_connections, ref_connections)
+        # If one has ports and other doesn't, it's a partial match
+        return abs(len(gen_ports) - len(ref_ports)) <= 2
+    
+    def find_similar_instances(self, target_name: str, inst_list: List[Dict]) -> List[str]:
+        """Find instances with similar names or module types"""
+        similar = []
+        target_norm = self.normalize_module_name(target_name)
         
-        # 计算初始指标(仅基于精确匹配)
-        initial_metrics = self._calculate_metrics(
-            comparison["exact_match_count"], 0, 
-            comparison["total_gen"], comparison["total_ref"]
-        )
+        for inst in inst_list:
+            inst_norm = self.normalize_module_name(inst["instance_name"])
+            module_norm = self.normalize_module_name(inst["module_type"])
+            
+            # Check instance name similarity
+            if target_norm == inst_norm or target_norm in inst_norm or inst_norm in target_norm:
+                similar.append(inst["instance_name"])
+                continue
+                
+            # Check module type similarity
+            if target_norm == module_norm or target_norm in module_norm or module_norm in target_norm:
+                similar.append(inst["instance_name"])
+                continue
         
-        # 如果没有未匹配的连接，或者参考或生成的连接为空，则不需要进行语义匹配
-        if not comparison['unmatched_gen'] or not comparison['unmatched_ref']:
+        return similar
+    
+    def compare_connections(self, generated_insts: List[Dict], reference_insts: List[Dict]) -> Dict[str, Any]:
+        """Compare instantiations and connections with fuzzy matching"""
+        
+        gen_insts = {inst["instance_name"]: inst for inst in generated_insts}
+        ref_insts = {inst["instance_name"]: inst for inst in reference_insts}
+        
+        correct_connections = []
+        missing_connections = []
+        extra_connections = []
+        
+        # Check each reference instantiation
+        for ref_name, ref_inst in ref_insts.items():
+            similar_instances = self.find_similar_instances(ref_name, generated_insts)
+            
+            if similar_instances:
+                best_match = similar_instances[0]
+                gen_inst = gen_insts[best_match]
+                
+                # Check if module types are similar
+                if self.normalize_module_name(gen_inst["module_type"]) == self.normalize_module_name(ref_inst["module_type"]) or \
+                   self.find_similar_modules(ref_inst["module_type"], [{"name": gen_inst["module_type"]}]):
+                    
+                    # Check connections similarity
+                    if self.connections_reasonably_match(gen_inst["connections"], ref_inst["connections"]):
+                        correct_connections.append(f"{ref_name} -> {best_match}")
+                    else:
+                        correct_connections.append(f"{ref_name} -> {best_match} (partial)")
+                else:
+                    missing_connections.append(f"{ref_name} (type mismatch)")
+            else:
+                missing_connections.append(ref_name)
+        
+        # Find extra instantiations
+        matched_gen_insts = set()
+        for ref_name in ref_insts:
+            similar = self.find_similar_instances(ref_name, generated_insts)
+            matched_gen_insts.update(similar)
+        
+        for gen_name in gen_insts:
+            if gen_name not in matched_gen_insts:
+                extra_connections.append(gen_name)
+        
+        return {
+            "correct_connections": correct_connections,
+            "missing_connections": missing_connections,
+            "extra_connections": extra_connections,
+            "total_generated_connections": len(generated_insts),
+            "total_reference_connections": len(reference_insts)
+        }
+    
+    def connections_reasonably_match(self, gen_connections: List[Dict], ref_connections: List[Dict]) -> bool:
+        """Check if connections reasonably match"""
+        if len(gen_connections) == 0 and len(ref_connections) == 0:
+            return True
+            
+        if len(gen_connections) > 0 and len(ref_connections) > 0:
+            # Normalize connection pairs for comparison
+            gen_conn_set = {(self.normalize_module_name(c["port"]), self.normalize_module_name(c["signal"])) 
+                           for c in gen_connections}
+            ref_conn_set = {(self.normalize_module_name(c["port"]), self.normalize_module_name(c["signal"])) 
+                           for c in ref_connections}
+            
+            # At least 30% overlap
+            overlap = len(gen_conn_set.intersection(ref_conn_set))
+            max_connections = max(len(gen_conn_set), len(ref_conn_set))
+            
+            return overlap / max_connections >= 0.3
+        
+        return abs(len(gen_connections) - len(ref_connections)) <= 2
+    
+    def calculate_scores(self, component_analysis: Dict, connection_analysis: Dict) -> Dict[str, float]:
+        """Calculate component and connection scores with partial credit"""
+        
+        # Component score (0-50)
+        total_ref_components = component_analysis["total_reference_components"]
+        correct_components = len(component_analysis["correct_components"])
+        
+        if total_ref_components > 0:
+            # Give partial credit for partial matches
+            partial_credit = 0
+            for component in component_analysis["correct_components"]:
+                if "partial" in component:
+                    partial_credit += 0.5
+                else:
+                    partial_credit += 1.0
+            
+            component_score = (partial_credit / total_ref_components) * 50
+        else:
+            component_score = 0
+        
+        # Connection score (0-50)
+        total_ref_connections = connection_analysis["total_reference_connections"]
+        correct_connections = len(connection_analysis["correct_connections"])
+        
+        if total_ref_connections > 0:
+            # Give partial credit for partial matches
+            partial_credit = 0
+            for connection in connection_analysis["correct_connections"]:
+                if "partial" in connection:
+                    partial_credit += 0.5
+                else:
+                    partial_credit += 1.0
+            
+            connection_score = (partial_credit / total_ref_connections) * 50
+        else:
+            connection_score = 0
+        
+        # Total score
+        total_score = component_score + connection_score
+        
+        return {
+            "component_score": round(component_score, 1),
+            "connection_score": round(connection_score, 1),
+            "total_score": round(total_score, 1)
+        }
+    
+    def analyze_verilog_a_code(self, generated_code: str, reference_code: str) -> Dict[str, Any]:
+        """Analyze Verilog-A code and compare with reference"""
+        
+        try:
+            # Extract components and connections
+            generated_modules = self.extract_verilog_modules(generated_code)
+            reference_modules = self.extract_verilog_modules(reference_code)
+            
+            generated_insts = self.extract_instantiations(generated_code)
+            reference_insts = self.extract_instantiations(reference_code)
+            
+            # Compare components and connections
+            component_analysis = self.compare_components(generated_modules, reference_modules)
+            connection_analysis = self.compare_connections(generated_insts, reference_insts)
+            
+            # Calculate scores
+            scoring = self.calculate_scores(component_analysis, connection_analysis)
+            
             return {
-                "content": "No semantic matching needed - all connections exactly matched or one set is empty.",
-                "score": int(min(100, initial_metrics["f1"] * 100)),  # 使用F1作为分数基础
-                "usage": {
-                    "generation_tokens": 0,
-                    "grading_tokens": 0,
-                    "total_tokens": 0
-                },
-                "latency": 0,
-                "connection_analysis": {
-                    "comparison": comparison,
-                    "gen_connections": [self._format_connection(c) for c in gen_connections],
-                    "ref_connections": [self._format_connection(c) for c in ref_connections],
-                    "semantic_matches": [],
-                    "total_matches": comparison["exact_match_count"],
-                    "metrics": initial_metrics,
-                    "final_unmatched_gen": comparison["unmatched_gen"],
-                    "final_unmatched_ref": comparison["unmatched_ref"]
+                "component_analysis": component_analysis,
+                "connection_analysis": connection_analysis,
+                "scoring": scoring,
+                "debug_info": {
+                    "generated_modules": [m["name"] for m in generated_modules],
+                    "reference_modules": [m["name"] for m in reference_modules],
+                    "generated_instances": [f"{i['module_type']} {i['instance_name']}" for i in generated_insts],
+                    "reference_instances": [f"{i['module_type']} {i['instance_name']}" for i in reference_insts]
                 }
             }
-        
-        # 构建差异信息，只发送未匹配的连接给大模型
-        diff_info = (
-            f"# Connection Relationship Analysis\n\n"
-            f"## Statistics\n"
-            f"- Total connections in reference: {comparison['total_ref']}\n"
-            f"- Total connections in generated: {comparison['total_gen']}\n"
-            f"- Exact regex matches: {comparison['exact_match_count']}\n\n"
-        )
-        
-        if comparison['unmatched_ref']:
-            diff_info += "## Unmatched Reference Connections\nThese connections are in the reference but not found in the generated answer:\n"
-            for i, conn in enumerate(comparison['unmatched_ref']):
-                diff_info += f"{i+1}. `{conn}`\n"
-            diff_info += "\n"
-            
-        if comparison['unmatched_gen']:
-            diff_info += "## Unmatched Generated Connections\nThese connections are in the generated answer but not found in the reference:\n"
-            for i, conn in enumerate(comparison['unmatched_gen']):
-                diff_info += f"{i+1}. `{conn}`\n"
-            diff_info += "\n"
-        
-        diff_info += (
-            "## Semantic Matching Task\n"
-            "For each unmatched connection, determine if it is semantically equivalent to any connection in the opposite set, "
-            "considering that different node names might refer to the same component in the diagram. "
-            "Please list all semantically equivalent pairs in this format:\n"
-            "Generated: `Node1 -> Node2` = Reference: `NodeA -> NodeB`\n\n"
-        )
+        except Exception as e:
+            import traceback
+            return {
+                "component_analysis": {"error": str(e)},
+                "connection_analysis": {"error": str(e)},
+                "scoring": {"component_score": 0, "connection_score": 0, "total_score": 0},
+                "debug_info": {"error": f"{str(e)}\n{traceback.format_exc()}"}
+            }
+    
+    async def grade(self, session: aiohttp.ClientSession, user_prompt: str, generated_answer: str, reference_answer: str) -> Dict[str, Any]:
+        """Grade the generated Verilog-A code against reference"""
         
         start_time = time.time()
         
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.config.grading_api_key}"
-        }
-        
-        # 构建提示词，专注于未匹配连接的语义等价分析
-        full_prompt = (
-            f"{grading_prompt}\n\n"
-            f"Generated Answer:\n{generated_answer}\n\n"
-            f"Reference Answer:\n{reference_answer}\n\n"
-            f"{diff_info}"
-            f"Only identify semantically equivalent connections from the unmatched sets. "
-            f"Focus on finding connections that refer to the same components but use different names or representations."
-        )
-        
-        data = {
-            "model": self.config.grading_model,
-            "messages": [
-                {"role": "user", "content": full_prompt}
-            ],
-        }
-        
-        # 仅当终端指定时添加可选参数
-        if hasattr(self.config, 'grading_temperature') and self.config.grading_temperature is not None:
-            data["temperature"] = self.config.grading_temperature
-        if hasattr(self.config, 'grading_top_p') and self.config.grading_top_p is not None:
-            data["top_p"] = self.config.grading_top_p
-        if hasattr(self.config, 'grading_max_tokens') and self.config.grading_max_tokens is not None:
-            data["max_tokens"] = self.config.grading_max_tokens
+        # Always perform Verilog-A specific analysis first
+        verilog_a_analysis = self.analyze_verilog_a_code(generated_answer, reference_answer)
         
         try:
-            async with session.post(f"{self.config.grading_api_base}/chat/completions", 
-                                    headers=headers, 
-                                    json=data,
-                                    timeout=600) as response:
-                response_json = await response.json()
-                end_time = time.time()
+            # Get grading prompt
+            grading_prompt_key = "verilog_a_grading_prompt"
+            if grading_prompt_key not in self.prompts:
+                # Use a simplified prompt that just asks for feedback
+                grading_prompt = """
+                Please provide a brief technical assessment of the following Verilog-A code implementation:
                 
-                if "choices" in response_json and len(response_json["choices"]) > 0:
-                    content = response_json["choices"][0]["message"]["content"]
-                    
-                    # 提取语义匹配对
-                    semantic_matches = self._extract_semantic_matches(content)
-                    
-                    # 将语义匹配转换为格式化连接，方便比较
-                    semantic_gen_matches = set()
-                    semantic_ref_matches = set()
-                    for match in semantic_matches:
-                        gen_clean = self._clean_match_string(match["generated"])
-                        ref_clean = self._clean_match_string(match["reference"])
-                        semantic_gen_matches.add(gen_clean)
-                        semantic_ref_matches.add(ref_clean)
-                    
-                    # 计算最终未匹配的连接
-                    # 先获取精确匹配的连接集合
-                    exact_matches_set = set(comparison["exact_matches"])
-                    
-                    # 计算经过语义匹配后仍未匹配的连接
-                    final_unmatched_gen = [conn for conn in comparison["unmatched_gen"] 
-                                        if conn not in semantic_gen_matches]
-                    final_unmatched_ref = [conn for conn in comparison["unmatched_ref"] 
-                                        if conn not in semantic_ref_matches]
-                    
-                    # 计算总匹配数（确保不超过参考总数）
-                    total_matches = min(
-                        comparison["exact_match_count"] + len(semantic_matches),
-                        comparison["total_ref"]
-                    )
-                    
-                    # 计算新指标
-                    metrics = self._calculate_metrics(
-                        comparison["exact_match_count"], 
-                        len(semantic_matches),
-                        comparison["total_gen"], 
-                        comparison["total_ref"]
-                    )
-                    
-                    # 生成分数 - 基于 F1
-                    score = int(min(100, metrics["f1"] * 100))
-                    
-                    result = {
-                        "content": content,
-                        "score": score,
-                        "usage": {
-                            "generation_tokens": 0,  # 在外部填充
-                            "grading_tokens": response_json.get("usage", {}).get("total_tokens", 0),
-                            "total_tokens": response_json.get("usage", {}).get("total_tokens", 0)
-                        },
-                        "latency": end_time - start_time,
-                        "connection_analysis": {
-                            "comparison": comparison,
-                            "gen_connections": [self._format_connection(c) for c in gen_connections],
-                            "ref_connections": [self._format_connection(c) for c in ref_connections],
-                            "semantic_matches": semantic_matches,
-                            "total_matches": total_matches,
-                            "metrics": metrics,
-                            "final_unmatched_gen": final_unmatched_gen,
-                            "final_unmatched_ref": final_unmatched_ref
-                        }
-                    }
-                    return result
-                else:
-                    # API 错误情况 - 仅使用正则匹配结果
-                    return {
-                        "error": "Invalid API response", 
-                        "content": "", 
-                        "score": int(min(100, initial_metrics["f1"] * 100)),
-                        "usage": {
-                            "generation_tokens": 0,
-                            "grading_tokens": 0,
-                            "total_tokens": 0
-                        }, 
-                        "latency": end_time - start_time,
-                        "connection_analysis": {
-                            "comparison": comparison,
-                            "gen_connections": [self._format_connection(c) for c in gen_connections],
-                            "ref_connections": [self._format_connection(c) for c in ref_connections],
-                            "semantic_matches": [],
-                            "total_matches": comparison["exact_match_count"],
-                            "metrics": initial_metrics,
-                            "final_unmatched_gen": comparison["unmatched_gen"],
-                            "final_unmatched_ref": comparison["unmatched_ref"]
-                        }
-                    }
+                Reference Code:
+                {reference_answer}
                 
-        except Exception as e:
-            # 异常情况 - 仅使用正则匹配结果
-            return {
-                "error": str(e), 
-                "content": "", 
-                "score": int(min(100, initial_metrics["f1"] * 100)),
-                "usage": {
-                    "generation_tokens": 0,
-                    "grading_tokens": 0,
-                    "total_tokens": 0
-                },
-                "latency": time.time() - start_time,
-                "connection_analysis": {
-                    "comparison": comparison,
-                    "gen_connections": [self._format_connection(c) for c in gen_connections],
-                    "ref_connections": [self._format_connection(c) for c in ref_connections],
-                    "semantic_matches": [],
-                    "total_matches": comparison["exact_match_count"],
-                    "metrics": initial_metrics,
-                    "final_unmatched_gen": comparison["unmatched_gen"],
-                    "final_unmatched_ref": comparison["unmatched_ref"]
-                }
+                Generated Code:
+                {generated_answer}
+                
+                Focus on: 1) Structural correctness, 2) Functionality implementation, 3) Best practices.
+                Provide feedback in 2-3 sentences.
+                """
+            else:
+                grading_prompt = self.prompts[grading_prompt_key]
+            
+            # Format the prompt
+            formatted_prompt = grading_prompt.format(
+                reference_answer=reference_answer,
+                generated_answer=generated_answer,
+                user_prompt=user_prompt
+            )
+            
+            # Prepare API request
+            payload = {
+                "model": self.config.grading_model,
+                "messages": [
+                    {
+                        "role": "user", 
+                        "content": formatted_prompt
+                    }
+                ],
+                "max_tokens": self.config.grading_max_tokens or 1000,
+                "temperature": self.config.grading_temperature or 0.3
             }
-
-    
-    def _extract_score(self, text: str) -> float:
-        """Extract score from grading text"""
-        try:
-            # Try multiple possible formats to extract score
-            patterns = [
-                r'score\s*(?:is)?(?::|=)?\s*(\d+(?:\.\d+)?)',
-                r'分数[:：]\s*(\d+(?:\.\d+)?)',
-                r'评分[:：]\s*(\d+(?:\.\d+)?)',
-                r'得分[:：]\s*(\d+(?:\.\d+)?)',
-                r'^\s*(\d+(?:\.\d+)?)\s*$'  # Standalone number
-            ]
             
-            for pattern in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
-                if match:
-                    return float(match.group(1))
+            headers = {
+                "Authorization": f"Bearer {self.config.grading_api_key}",
+                "Content-Type": "application/json"
+            }
             
-            # If no specific format matches, try to extract any number (may be a score)
-            numbers = re.findall(r'(\d+(?:\.\d+)?)', text)
-            if numbers and 0 <= float(numbers[0]) <= 100:
-                return float(numbers[0])
+            # Construct API URL
+            api_url = self.config.grading_api_base
+            if not api_url.endswith('/'):
+                api_url += '/'
+            api_url += "chat/completions"
+            
+            # Make API request
+            async with session.post(
+                api_url,
+                json=payload,
+                headers=headers
+            ) as response:
                 
-            return 0
-        except:
-            return 0
+                response_data = await response.json()
+                
+                if response.status != 200:
+                    error_msg = response_data.get("error", {}).get("message", "Unknown error")
+                    llm_feedback = f"API Error: {error_msg}"
+                    usage_info = {}
+                else:
+                    # Extract response content
+                    llm_feedback = response_data["choices"][0]["message"]["content"]
+                    
+                    # Calculate token usage
+                    usage_info = {
+                        "grading_tokens": response_data.get("usage", {}).get("total_tokens", 0),
+                        "prompt_tokens": response_data.get("usage", {}).get("prompt_tokens", 0),
+                        "completion_tokens": response_data.get("usage", {}).get("completion_tokens", 0)
+                    }
+        
+        except Exception as e:
+            llm_feedback = f"Failed to get LLM feedback: {str(e)}"
+            usage_info = {}
+        
+        # Use our analysis scores (more reliable than LLM parsing)
+        final_score = verilog_a_analysis["scoring"]["total_score"]
+        
+        return {
+            "score": final_score,
+            "content": llm_feedback,
+            "usage": usage_info,
+            "latency": time.time() - start_time,
+            "verilog_a_analysis": verilog_a_analysis
+        }

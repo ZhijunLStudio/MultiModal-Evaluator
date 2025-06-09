@@ -2,7 +2,7 @@ import os
 import asyncio
 import traceback
 from src.config import Config
-from src.evaluator import Evaluator
+from src.evaluator import VerilogAEvaluator
 from src.utils import parse_args, create_config_from_args, analyze_bottlenecks
 
 async def main():
@@ -38,7 +38,7 @@ async def main():
     
     try:
         # Create evaluator and run
-        evaluator = Evaluator(config)
+        evaluator = VerilogAEvaluator(config)
         await evaluator.run()
         
         # Analyze performance bottlenecks
