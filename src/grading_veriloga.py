@@ -134,9 +134,9 @@ class VerilogAParser:
                 # 获取所有匹配的端口名
                 ports = [p for p in body_port_match.groups() if p]
                 # 根据声明类型（input/output）添加到相应的列表
-                if "input" in body_port_match.group(0).lower():
+                if "input" in body_port_match.group(0):
                     parsed_ports["inputs"].extend(ports)
-                elif "output" in body_port_match.group(0).lower():
+                elif "output" in body_port_match.group(0):
                     parsed_ports["outputs"].extend(ports)
                 parsed_ports["ports"].extend(ports)
 
@@ -207,9 +207,9 @@ class LLMHelper:
 
     def _query_openai(self, prompt_text, system_message="You are an expert in Verilog-A and circuit design."):
         """Private method to send a query to OpenAI and get a JSON response."""
-        print(f"\n--- Sending Query to OpenAI ({self.model}) ---")
-        print(f"System: {system_message}")
-        print(f"User Prompt (first 200 chars): {prompt_text[:200]}...")
+        # print(f"\n--- Sending Query to OpenAI ({self.model}) ---")
+        # print(f"System: {system_message}")
+        # print(f"User Prompt (first 200 chars): {prompt_text[:200]}...")
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -362,6 +362,7 @@ class VerilogAComparator:
             driver_info = drive_load_info["driver"]
             if not driver_info:
                 # 跳过没有驱动源的网络 (例如，未连接的输入)
+                print(f"skip {net_name} because it has no driver")
                 continue
 
             for load_info in drive_load_info["loads"]:
@@ -375,14 +376,417 @@ class VerilogAComparator:
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0
         f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         return precision, recall, f1
+    
+
+    def get_module_score(self,results):
+        tp_mod = len(results['match_modules'])
+        fp_mod = len(results['FP_modules'])
+        fn_mod = len(results['FN_modules'])
+        
+        results["module_metrics"]["tp"] = tp_mod
+        results["module_metrics"]["fp"] = fp_mod
+        results["module_metrics"]["fn"] = fn_mod
+        p, r, f1 = self._calculate_precision_recall_f1(tp_mod, fp_mod, fn_mod)
+        results["module_metrics"]["precision"]  = p
+        results["module_metrics"]["recall"]     = r
+        results["module_metrics"]["f1"]         = f1
+
+        return results
+    
+    def get_connection_score(self,results):
+        tp_conn = len(results['matched_connections'])
+        fp_conn = len(results['FP_connections'])
+        fn_conn = len(results['FN_connections'])
+
+        print("intersection nums:")
+        for conn in results['matched_connections']:
+            print(conn)
+        print("fp_conn:")
+        for conn in results['FP_connections']:
+            print(conn)
+        print("fn_conn:")
+        for conn in results['FN_connections']:
+            print(conn)
+
+        results["connection_metrics"]["tp"] = tp_conn
+        results["connection_metrics"]["fp"] = fp_conn
+        results["connection_metrics"]["fn"] = fn_conn
+        p, r, f1 = self._calculate_precision_recall_f1(tp_conn, fp_conn, fn_conn)
+        results["connection_metrics"]["precision"] = p
+        results["connection_metrics"]["recall"] = r
+        results["connection_metrics"]["f1"] = f1
+        return results
+
+    def get_module_match(self,parsed_label,parsed_llm,label_sub_module_names,llm_actual_sub_modules,module_mappings):
+
+        tp_mod = 0
+        mapped_llm_modules_in_tp = set()
+        mapped_label_modules_in_tp = set()
+        match_modules = []
+        for label_mod in label_sub_module_names:
+            llm_mapped_name = module_mappings.get(label_mod)
+            if llm_mapped_name and llm_mapped_name in parsed_llm["modules"]:
+                # Check I/O counts for structural similarity after LLM mapping
+                label_io = (len(parsed_label["modules"][label_mod]["ports"]["inputs"]), len(parsed_label["modules"][label_mod]["ports"]["outputs"]))
+                llm_io = (len(parsed_llm["modules"][llm_mapped_name]["ports"]["inputs"]), len(parsed_llm["modules"][llm_mapped_name]["ports"]["outputs"]))
+                if label_io == llm_io:
+                    tp_mod += 1
+                    mapped_llm_modules_in_tp.add(llm_mapped_name)
+                    mapped_label_modules_in_tp.add(label_mod)
+                    match_modules.append([label_mod,llm_mapped_name])
+        return match_modules,mapped_llm_modules_in_tp,mapped_label_modules_in_tp
+
+    def generate_html_report(self, results, image_name):
+        """生成HTML格式的评估报告"""
+        html_template = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Verilog-A 评估报告</title>
+            <style>
+                body {{ 
+                    font-family: Arial, sans-serif; 
+                    margin: 0;
+                    padding: 20px;
+                    background-color: #f5f5f5;
+                }}
+                .container {{ 
+                    display: flex;
+                    gap: 20px;
+                    max-width: 1800px;
+                    margin: 0 auto;
+                }}
+                .left-panel, .right-panel {{
+                    flex: 1;
+                    background: white;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    padding: 20px;
+                    height: calc(100vh - 40px);
+                    overflow-y: auto;
+                }}
+                .section {{ 
+                    margin-bottom: 20px;
+                    padding: 15px;
+                    border: 1px solid #e0e0e0;
+                    border-radius: 6px;
+                    background: white;
+                }}
+                .section-title {{
+                    font-size: 18px;
+                    font-weight: bold;
+                    margin-bottom: 15px;
+                    color: #333;
+                    border-bottom: 2px solid #eee;
+                    padding-bottom: 8px;
+                }}
+                .code-block {{ 
+                    background-color: #f8f8f8;
+                    padding: 12px;
+                    border-radius: 4px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 14px;
+                    white-space: pre-wrap;
+                    overflow-x: auto;
+                    border: 1px solid #e0e0e0;
+                }}
+                .json-block {{
+                    background-color: #f8f8f8;
+                    padding: 12px;
+                    border-radius: 4px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 14px;
+                    white-space: pre-wrap;
+                    overflow-x: auto;
+                    border: 1px solid #e0e0e0;
+                }}
+                .mapping-table {{ 
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 10px 0;
+                    font-size: 14px;
+                }}
+                .mapping-table th, .mapping-table td {{ 
+                    padding: 8px;
+                    border: 1px solid #e0e0e0;
+                    text-align: left;
+                }}
+                .mapping-table th {{ 
+                    background-color: #f5f5f5;
+                    font-weight: bold;
+                }}
+                .connection-list {{ 
+                    list-style-type: none;
+                    padding: 0;
+                    margin: 0;
+                }}
+                .connection-item {{ 
+                    padding: 8px;
+                    margin: 4px 0;
+                    background-color: #f8f8f8;
+                    border-radius: 4px;
+                    border: 1px solid #e0e0e0;
+                    font-size: 14px;
+                }}
+                .success {{ color: #28a745; }}
+                .warning {{ color: #ffc107; }}
+                .error {{ color: #dc3545; }}
+                .metric-box {{
+                    display: inline-block;
+                    padding: 8px 15px;
+                    margin: 5px;
+                    background-color: #f8f8f8;
+                    border-radius: 4px;
+                    border: 1px solid #e0e0e0;
+                    font-size: 14px;
+                }}
+                .metric-value {{
+                    font-weight: bold;
+                    margin-right: 5px;
+                }}
+                .metric-label {{
+                    color: #666;
+                }}
+                .port-mapping-section {{
+                    margin-bottom: 20px;
+                    padding: 15px;
+                    background-color: #f8f8f8;
+                    border-radius: 6px;
+                    border: 1px solid #e0e0e0;
+                }}
+                .port-mapping-title {{
+                    font-size: 16px;
+                    font-weight: bold;
+                    margin-bottom: 10px;
+                    color: #333;
+                }}
+                .port-mapping-table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-top: 10px;
+                    background-color: white;
+                }}
+                .port-mapping-table th, .port-mapping-table td {{
+                    padding: 8px;
+                    border: 1px solid #e0e0e0;
+                    text-align: left;
+                }}
+                .port-mapping-table th {{
+                    background-color: #f5f5f5;
+                    font-weight: bold;
+                }}
+                .port-mapping-table td {{
+                    font-family: 'Courier New', monospace;
+                }}
+                .connection-table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin-top: 10px;
+                    background-color: white;
+                }}
+                .connection-table th, .connection-table td {{
+                    padding: 8px;
+                    border: 1px solid #e0e0e0;
+                    text-align: left;
+                    font-family: 'Courier New', monospace;
+                }}
+                .connection-table th {{
+                    background-color: #f5f5f5;
+                    font-weight: bold;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="left-panel">
+                    <div class="section">
+                        <div class="section-title">原始代码</div>
+                        <h3>label代码</h3>
+                        <div class="code-block">{label_code}</div>
+                        <h3>LLM生成代码</h3>
+                        <div class="code-block">{llm_code}</div>
+                    </div>
+                    <div class="section">
+                        <div class="section-title">解析结果</div>
+                        <h3>llm解析</h3>
+                        <div class="json-block">{parsed_label}</div>
+                        <h3>LLM解析</h3>
+                        <div class="json-block">{parsed_llm}</div>
+                    </div>
+                    <div class="section">
+                        <div class="section-title">连接信息</div>
+                        <h3>llm连接</h3>
+                        <table class="connection-table">
+                            <tr>
+                                <th>驱动源</th>
+                                <th>负载</th>
+                            </tr>
+                            {label_connections}
+                        </table>
+                        <h3>LLM连接</h3>
+                        <table class="connection-table">
+                            <tr>
+                                <th>驱动源</th>
+                                <th>负载</th>
+                            </tr>
+                            {llm_connections}
+                        </table>
+                    </div>
+                </div>
+                
+                <div class="right-panel">
+                    <div class="section">
+                        <div class="section-title">评估指标</div>
+                        <div class="metric-box">
+                            <span class="metric-value">模块 F1: {module_f1:.2f}</span>
+                        </div>
+                        <div class="metric-box">
+                            <span class="metric-value">连接 F1: {connection_f1:.2f}</span>
+                        </div>
+                    </div>
+
+                    <div class="section">
+                        <div class="section-title">模块匹配结果</div>
+                        <h3>正确匹配的模块</h3>
+                        <table class="mapping-table">
+                            <tr>
+                                <th>标签模块</th>
+                                <th>LLM模块</th>
+                            </tr>
+                            {module_mappings}
+                        </table>
+
+                        <h3>label未匹配的模块</h3>
+                        <div class="connection-list">
+                            {fn_modules}
+                        </div>
+
+                        <h3>llm未匹配的模块</h3>
+                        <div class="connection-list">
+                            {fp_modules}
+                        </div>
+                    </div>
+
+                    <div class="section">
+                        <div class="section-title">端口匹配结果</div>
+                        {port_mappings}
+                    </div>
+
+                    <div class="section">
+                        <div class="section-title">连接匹配结果</div>
+                        <h3>正确匹配的连接</h3>
+                        <ul class="connection-list">
+                            {matched_connections}
+                        </ul>
+
+                        <h3>label未匹配的连接</h3>
+                        <ul class="connection-list">
+                            {fn_connections}
+                        </ul>
+
+                        <h3>llm未匹配的连接</h3>
+                        <ul class="connection-list">
+                            {fp_connections}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+
+        # 准备模块映射表格内容
+        module_mappings_html = ""
+        for label_mod, llm_mod in results["module_mappings"].items():
+            module_mappings_html += f"<tr><td>{label_mod}</td><td>{llm_mod}</td></tr>"
+
+        # 准备端口映射内容
+        port_mappings_html = ""
+        for mod_name, port_map in results["port_mappings"].items():
+            port_mappings_html += f"""
+            <div class="port-mapping-section">
+                <div class="port-mapping-title">{mod_name}</div>
+                <table class="port-mapping-table">
+                    <tr>
+                        <th>label_port</th>
+                        <th>llm_port</th>
+                    </tr>
+            """
+            for label_port, llm_port in port_map.items():
+                port_mappings_html += f"""
+                    <tr>
+                        <td>{label_port}</td>
+                        <td>{llm_port}</td>
+                    </tr>
+                """
+            port_mappings_html += """
+                </table>
+            </div>
+            """
+
+        # 准备连接列表内容
+        def format_connection(conn):
+            return f"<li class='connection-item'>{conn[0][0]}.{conn[0][1]} → {conn[1][0]}.{conn[1][1]}</li>"
+
+        def format_connection_table(conn):
+            return f"<tr><td>{conn[0][0]}.{conn[0][1]}</td><td>{conn[1][0]}.{conn[1][1]}</td></tr>"
+
+        matched_connections_html = "".join(format_connection(conn) for conn in results["matched_connections"])
+        fp_connections_html = "".join(format_connection(conn) for conn in results["FP_connections"])
+        fn_connections_html = "".join(format_connection(conn) for conn in results["FN_connections"])
+
+        # 准备label和llm连接表格内容
+        label_connections_html = "".join(format_connection_table(conn) for conn in results["label_connections"])
+        llm_connections_html = "".join(format_connection_table(conn) for conn in results["llm_connections"])
+
+        # 准备未匹配和错误匹配的模块列表
+        fn_modules_html = "".join(f"<div class='connection-item'>{mod}</div>" for mod in results["FN_modules"])
+        fp_modules_html = "".join(f"<div class='connection-item'>{mod}</div>" for mod in results["FP_modules"])
+
+        # 格式化JSON输出
+        parsed_label_str = json.dumps(results["parsed_label"], indent=2, ensure_ascii=False)
+        parsed_llm_str = json.dumps(results["parsed_llm"], indent=2, ensure_ascii=False)
+
+        # 填充模板
+        html_content = html_template.format(
+            image_name=image_name,
+            module_f1=results["module_metrics"]["f1"],
+            connection_f1=results["connection_metrics"]["f1"],
+            module_mappings=module_mappings_html,
+            port_mappings=port_mappings_html,
+            matched_connections=matched_connections_html,
+            fp_connections=fp_connections_html,
+            fn_connections=fn_connections_html,
+            fn_modules=fn_modules_html,
+            fp_modules=fp_modules_html,
+            label_code=results["label_code_str"],
+            llm_code=results["llm_code_str"],
+            parsed_label=parsed_label_str,
+            parsed_llm=parsed_llm_str,
+            label_connections=label_connections_html,
+            llm_connections=llm_connections_html
+        )
+
+        return html_content
 
     def run_comparison(self, label_code_str, llm_code_str):
         """Orchestrates the full comparison process."""
         results = {
             "module_metrics": {"tp": 0, "fp": 0, "fn": 0, "precision": 0, "recall": 0, "f1": 0},
             "connection_metrics": {"tp": 0, "fp": 0, "fn": 0, "precision": 0, "recall": 0, "f1": 0},
+            "label_code_str": label_code_str,
+            "llm_code_str": llm_code_str,
+            "parsed_label": {},
+            "parsed_llm": {},
             "module_mappings": {},
             "port_mappings": {},
+            "match_modules": [],
+            "FP_modules": [],
+            "FN_modules": [],
+            "matched_connections": [],
+            "FP_connections": [],
+            "FN_connections": [],
             "errors": []
         }
         print("label_code_str:",label_code_str)
@@ -397,10 +801,10 @@ class VerilogAComparator:
         if results["errors"]:
             return results
         
-        print("parsed_label:",parsed_label)
-        print("parsed_llm:",parsed_llm)
+        results['parsed_label']=parsed_label
+        results['parsed_llm']=parsed_llm
 
-
+        ## 模块映射
         label_module_sigs = self.parser.get_module_signatures(parsed_label)
         llm_module_sigs = self.parser.get_module_signatures(parsed_llm)
         
@@ -421,6 +825,7 @@ class VerilogAComparator:
         module_mappings = self.llm_helper.map_module_names(label_module_sigs, llm_module_sigs, label_top, llm_top)
         results["module_mappings"] = module_mappings
 
+        ## 端口映射
         port_mappings = {}
         for label_mod_name, llm_mod_name in module_mappings.items():
             if not label_mod_name or not llm_mod_name: continue
@@ -431,72 +836,28 @@ class VerilogAComparator:
                     label_mod_name, label_ports, llm_mod_name, llm_ports
                 )
         results["port_mappings"] = port_mappings
-        
-        # Module Metrics
+
+        ## 模块匹配
         label_sub_module_names = {m for m, d in parsed_label["modules"].items() if d.get("type") == "sub_module"}
         llm_actual_sub_modules = {m for m, d in parsed_llm["modules"].items() if d.get("type") == "sub_module"}
-        
-        tp_mod = 0
-        mapped_llm_modules_in_tp = set()
-        for label_mod in label_sub_module_names:
-            llm_mapped_name = module_mappings.get(label_mod)
-            if llm_mapped_name and llm_mapped_name in parsed_llm["modules"]:
-                # Check I/O counts for structural similarity after LLM mapping
-                label_io = (len(parsed_label["modules"][label_mod]["ports"]["inputs"]), len(parsed_label["modules"][label_mod]["ports"]["outputs"]))
-                llm_io = (len(parsed_llm["modules"][llm_mapped_name]["ports"]["inputs"]), len(parsed_llm["modules"][llm_mapped_name]["ports"]["outputs"]))
-                if label_io == llm_io:
-                    tp_mod += 1
-                    mapped_llm_modules_in_tp.add(llm_mapped_name)
-        
-        fp_mod = len(llm_actual_sub_modules - mapped_llm_modules_in_tp)
-        fn_mod = len(label_sub_module_names) - tp_mod
-        
-        results["module_metrics"]["tp"] = tp_mod
-        results["module_metrics"]["fp"] = fp_mod
-        results["module_metrics"]["fn"] = fn_mod
-        p, r, f1 = self._calculate_precision_recall_f1(tp_mod, fp_mod, fn_mod)
-        results["module_metrics"]["precision"] = p
-        results["module_metrics"]["recall"] = r
-        results["module_metrics"]["f1"] = f1
+        match_modules,mapped_llm_modules_in_tp,mapped_label_modules_in_tp = self.get_module_match(parsed_label,parsed_llm,label_sub_module_names,llm_actual_sub_modules,module_mappings)
+        results['match_modules']=match_modules
+        results['FP_modules']=list(llm_actual_sub_modules - mapped_llm_modules_in_tp)
+        results['FN_modules']=list(label_sub_module_names - mapped_label_modules_in_tp)
+        results = self.get_module_score(results)
 
         # Connection Metrics
         label_connections = self._build_connection_graph_2(parsed_label, module_mappings, port_mappings)
         llm_connections   = self._build_connection_graph_2(parsed_llm, module_mappings, port_mappings)
-        
-        tp_conn = len(label_connections.intersection(llm_connections))
-        fp_conn = len(llm_connections - label_connections)
-        fn_conn = len(label_connections - llm_connections)
 
-        print("module mapping:")
-        for k,v in module_mappings.items():
-            print(k,v)
+        results['matched_connections']=list(label_connections.intersection(llm_connections))
+        results['FP_connections']=list(llm_connections - label_connections)
+        results['FN_connections']=list(label_connections - llm_connections)
 
-
-        print("port mapping:",)
-        for  k,v in port_mappings.items():
-            print(k,v)
-
-        
-        
-        print("intersection nums:")
-        for conn in label_connections.intersection(llm_connections):
-            print(conn)
-        print("fp_conn:")
-        for conn in llm_connections - label_connections:
-            print(conn)
-        print("fn_conn:")
-        for conn in label_connections - llm_connections:
-            print(conn)
-
-        results["connection_metrics"]["tp"] = tp_conn
-        results["connection_metrics"]["fp"] = fp_conn
-        results["connection_metrics"]["fn"] = fn_conn
-        p, r, f1 = self._calculate_precision_recall_f1(tp_conn, fp_conn, fn_conn)
-        results["connection_metrics"]["precision"] = p
-        results["connection_metrics"]["recall"] = r
-        results["connection_metrics"]["f1"] = f1
-
-        print(results)
+        results['label_connections']=list(label_connections)
+        results['llm_connections']=list(llm_connections)
+        # 计算连接的精确率、召回率和F1值
+        results = self.get_connection_score(results)
 
         return results
     
@@ -583,6 +944,12 @@ if __name__ == "__main__":
         parser = VerilogAParser()   
         comparator = VerilogAComparator(parser, llm_helper)
 
+        results_dir = ".cache/results"
+        import shutil
+        if os.path.exists(results_dir):
+            shutil.rmtree(results_dir)
+        os.makedirs(results_dir)
+
         # 获取所有LLM生成的结果
         llm_result = get_llm_result(".cache/converted_conversations.json")
         benchmark = get_benchmark(".cache/system_block_benchmark_v2_verilogA.json")
@@ -595,7 +962,16 @@ if __name__ == "__main__":
             print(f"图片路径: {image_name}")
             if image_name not in benchmark:
                 print(f"{image_name} not in benchmark.")
-            comparator.run_comparison(benchmark[image_name]['answer'],llm_info['answer'])
+            results = comparator.run_comparison(benchmark[image_name]['answer'],llm_info['answer'])
+
+            # 保存JSON结果
+            with open(f"{results_dir}/{image_name}.json", "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=4)
+            
+            # 生成并保存HTML报告
+            html_content = comparator.generate_html_report(results, image_name)
+            with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
+                f.write(html_content)
             
     except Exception as e:
         print(traceback.format_exc())
