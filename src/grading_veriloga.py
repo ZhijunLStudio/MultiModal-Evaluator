@@ -654,6 +654,30 @@ class VerilogAComparator:
                     background-color: #f5f5f5;
                     font-weight: bold;
                 }}
+                .port-info {{
+                    margin-left: 20px;
+                    font-size: 13px;
+                    color: #666;
+                }}
+                .port-type {{
+                    font-weight: bold;
+                    color: #333;
+                }}
+                .unmatched-modules {{
+                    display: flex;
+                    gap: 20px;
+                }}
+                .unmatched-column {{
+                    flex: 1;
+                }}
+                .module-pair {{
+                    display: flex;
+                    gap: 20px;
+                    margin-bottom: 10px;
+                }}
+                .module-column {{
+                    flex: 1;
+                }}
             </style>
         </head>
         <body>
@@ -679,15 +703,15 @@ class VerilogAComparator:
                     <div class="section">
                         <div class="section-title">评估指标</div>
                         <div class="metric-box">
-                            <span class="metric-label">模块映射评估:</span>
+                            <span class="metric-label">模块映射:</span>
                             <span class="metric-value">P: {module_mappings_precision:.2f}, R: {module_mappings_recall:.2f}, F1: {module_mappings_f1:.2f}</span>
                         </div>
                         <div class="metric-box">
-                            <span class="metric-label">模块匹配评估:</span>
+                            <span class="metric-label">模块+端口数量匹配:</span>
                             <span class="metric-value">P: {module_precision:.2f}, R: {module_recall:.2f}, F1: {module_f1:.2f}</span>
                         </div>
                         <div class="metric-box">
-                            <span class="metric-label">连接评估:</span>
+                            <span class="metric-label">连接匹配:</span>
                             <span class="metric-value">P: {connection_precision:.2f}, R: {connection_recall:.2f}, F1: {connection_f1:.2f}</span>
                         </div>
                     </div>
@@ -719,13 +743,15 @@ class VerilogAComparator:
 
                         <div class="module-mapping-section">
                             <div class="module-mapping-title">未匹配的模块</div>
-                            <h3>标签中未匹配的模块</h3>
-                            <div class="connection-list">
-                                {fn_modules}
-                            </div>
-                            <h3>LLM中未匹配的模块</h3>
-                            <div class="connection-list">
-                                {fp_modules}
+                            <div class="unmatched-modules">
+                                <div class="unmatched-column">
+                                    <h3>标签模块</h3>
+                                    {fn_modules}
+                                </div>
+                                <div class="unmatched-column">
+                                    <h3>LLM模块</h3>
+                                    {fp_modules}
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -795,8 +821,74 @@ class VerilogAComparator:
             """
 
         # 准备未匹配和错误匹配的模块列表
-        fn_modules_html = "".join(f"<div class='connection-item'>{mod}</div>" for mod in results["FN_modules"])
-        fp_modules_html = "".join(f"<div class='connection-item'>{mod}</div>" for mod in results["FP_modules"])
+        def format_module_with_ports(module_name, parsed_data):
+            module_data = parsed_data["modules"].get(module_name, {})
+            ports = module_data.get("ports", {})
+            return f"""
+                <div class='connection-item'>
+                    {module_name}
+                    <div class='port-info'>
+                        <div><span class='port-type'>输入端口:</span> {', '.join(ports.get('inputs', []))}</div>
+                        <div><span class='port-type'>输出端口:</span> {', '.join(ports.get('outputs', []))}</div>
+                        <div><span class='port-type'>双向端口:</span> {', '.join(ports.get('inouts', []))}</div>
+                    </div>
+                </div>
+            """
+
+        # 创建映射关系字典
+        label_to_llm = results["module_mappings"]
+        llm_to_label = {v: k for k, v in label_to_llm.items()}
+
+        # 准备未匹配模块的HTML
+        def prepare_unmatched_modules_html():
+            # 获取所有未匹配的模块
+            fn_modules = set(results["FN_modules"])
+            fp_modules = set(results["FP_modules"])
+            
+            # 创建模块对列表
+            module_pairs = []
+            
+            # 1. 处理已映射但未匹配的模块对
+            # 创建要移除的模块集合
+            to_remove_label = set()
+            to_remove_llm = set()
+            
+            for label_mod in fn_modules:
+                if label_mod in label_to_llm:
+                    llm_mod = label_to_llm[label_mod]
+                    if llm_mod in fp_modules:
+                        module_pairs.append((label_mod, llm_mod))
+                        to_remove_label.add(label_mod)
+                        to_remove_llm.add(llm_mod)
+            
+            # 移除已处理的模块
+            fn_modules -= to_remove_label
+            fp_modules -= to_remove_llm
+            
+            # 2. 处理剩余的未映射模块
+            remaining_pairs = []
+            for label_mod in sorted(fn_modules):
+                remaining_pairs.append((label_mod, None))
+            for llm_mod in sorted(fp_modules):
+                remaining_pairs.append((None, llm_mod))
+            
+            # 生成HTML
+            html = ""
+            for label_mod, llm_mod in module_pairs + remaining_pairs:
+                html += "<div class='module-pair'>"
+                if label_mod:
+                    html += f"<div class='module-column'>{format_module_with_ports(label_mod, results['parsed_label'])}</div>"
+                else:
+                    html += "<div class='module-column'></div>"
+                if llm_mod:
+                    html += f"<div class='module-column'>{format_module_with_ports(llm_mod, results['parsed_llm'])}</div>"
+                else:
+                    html += "<div class='module-column'></div>"
+                html += "</div>"
+            return html
+
+        fn_modules_html = prepare_unmatched_modules_html()
+        fp_modules_html = ""  # 不再需要单独的fp_modules_html，因为已经包含在fn_modules_html中
 
         # 准备连接列表内容
         def format_connection(conn):
@@ -859,8 +951,8 @@ class VerilogAComparator:
             "parsed_llm": {},
             "module_mappings": {},  # 模块映射结果
             "module_mappings_tp": {},  # 正确映射的模块
-            "module_mappings_fp": set(),  # 错误映射的模块
-            "module_mappings_fn": set(),  # 未映射的模块
+            "module_mappings_fp": [],  # 错误映射的模块
+            "module_mappings_fn": [],  # 未映射的模块
             "match_modules": [],  # 匹配成功的模块
             "FP_modules": [],  # 错误匹配的模块
             "FN_modules": [],  # 未匹配的模块
@@ -913,9 +1005,11 @@ class VerilogAComparator:
 
         # 获取模块映射结果
         module_mappings = self.llm_helper.map_module_names(label_module_sigs, llm_module_sigs, label_top, llm_top)
+
+        print(module_mappings)
         results["module_mappings"] = module_mappings
-        results["module_mappings_fp"] = list(set(llm_module_sigs.keys()) - set(module_mappings.keys()))
-        results["module_mappings_fn"] = list(set(module_mappings.keys()) - set(llm_module_sigs.keys()))
+        results["module_mappings_fp"] = list(set(llm_module_sigs.keys()) - set(module_mappings.values()))
+        results["module_mappings_fn"] = list(set(module_mappings.keys()) - set(label_module_sigs.keys()))
         
         # 计算模块映射的精确率、召回率和F1值
         results = self.get_module_mappings_score(results)
@@ -1052,28 +1146,40 @@ if __name__ == "__main__":
         benchmark = get_benchmark(".cache/system_block_benchmark_v2_verilogA.json")
         # test_list=["14128_2078_block_circuit_train_15k_0321_001118.jpg"] #"2747_block_circuit_train_15k_0321_001209.jpg",
         # test_list = ["2695_block_circuit_train_15k_0321_001159.jpg"]
-        # test_list = ["2622_block_circuit_train_15k_0321_001159.jpg"]
-        test_list = ["12980_2061_block_circuit_train_15k_0321_001118.jpg"]
+        test_list = ["2622_block_circuit_train_15k_0321_001159.jpg"]
+        # test_list = ["12980_2061_block_circuit_train_15k_0321_001118.jpg"]
         # 处理每个结果
+        count = 0
         for image_name, llm_info in llm_result.items():
-            if image_name not in test_list:
-                # print(f"{image_name} not in test_list.")
-                continue 
-            print(f"图片路径: {image_name}")
-            if image_name not in benchmark:
-                print(f"{image_name} not in benchmark.")
-            results = comparator.run_comparison(benchmark[image_name]['answer'],llm_info['answer'])
+            # if image_name not in test_list:
+            #     # print(f"{image_name} not in test_list.")
+            #     continue 
+            json_path = f"{results_dir}/{image_name}.json"
 
-            # 保存JSON结果
-            with open(f"{results_dir}/{image_name}.json", "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=4)
+            if os.path.exists(json_path):
+                continue
+            try:
+                count+=1
+                if count>20:
+                    continue
+                print(f"图片路径: {image_name}")
+                if image_name not in benchmark:
+                    print(f"{image_name} not in benchmark.")
+                results = comparator.run_comparison(benchmark[image_name]['answer'],llm_info['answer'])
 
-            print(results)
-            
-            # 生成并保存HTML报告
-            html_content = comparator.generate_html_report(results, image_name)
-            with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
-                f.write(html_content)
+                # 保存JSON结果
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(results, f, ensure_ascii=False, indent=4)
+
+                # print(results)
+                
+                # 生成并保存HTML报告
+                html_content = comparator.generate_html_report(results, image_name)
+                with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
+            except Exception as e:
+                print(traceback.format_exc())
+                print(e)
             
     except Exception as e:
         print(traceback.format_exc())
