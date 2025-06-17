@@ -11,6 +11,7 @@ from src.config import Config
 from src.image_processor import ImageProcessor
 from src.model_client import AnswerApiClient
 from src.grading_client import VerilogAGradingClient
+from src.grading_veriloga_soft import VerilogAComparator
 
 class VerilogAEvaluator:
     def __init__(self, config: Config):
@@ -21,7 +22,7 @@ class VerilogAEvaluator:
         self.answer_api_client = AnswerApiClient(config)
             
         # 使用新的Verilog-A评分客户端
-        self.grading_client = VerilogAGradingClient(config)
+        self.grading_client = VerilogAComparator(config)
         self.grading_client.prompts = self.prompts
         
         # 初始化统计数据结构 - 适配Verilog-A评估
@@ -69,19 +70,33 @@ class VerilogAEvaluator:
                 return json.load(f)
         except Exception as e:
             raise Exception(f"Failed to load prompts: {str(e)}")
+        
+
+    def _load_json(self) -> List[Dict[str, Any]]:
+        """Load JSON data"""
+        data = []
+        try:
+            with open(self.config.jsonl_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            raise Exception(f"Failed to load JSON data: {str(e)}")
+        return data
     
     def _load_jsonl(self) -> List[Dict[str, Any]]:
         """Load JSONL data"""
         data = []
         try:
-            with open(self.config.jsonl_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        data.append(json.loads(line))
-            
-            if self.config.eval_samples > 0:
-                return data[:self.config.eval_samples]
-            return data
+            if os.path.splitext(self.config.jsonl_path)[1] == '.json':
+                return self._load_json()
+            elif os.path.splitext(self.config.jsonl_path)[1] == '.jsonl':
+                with open(self.config.jsonl_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            data.append(json.loads(line))
+                
+                if self.config.eval_samples > 0:
+                    return data[:self.config.eval_samples]
+                return data
         except Exception as e:
             raise Exception(f"Failed to load JSONL data: {str(e)}")
 
