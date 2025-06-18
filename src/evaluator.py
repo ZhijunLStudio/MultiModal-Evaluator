@@ -11,10 +11,7 @@ from src.config import Config
 from src.image_processor import ImageProcessor
 from src.model_client import AnswerApiClient
 from src.grading_client import VerilogAGradingClient
-<<<<<<< HEAD
-=======
 from src.grading_veriloga import VerilogAComparator
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
 
 class VerilogAEvaluator:
     def __init__(self, config: Config):
@@ -25,11 +22,7 @@ class VerilogAEvaluator:
         self.answer_api_client = AnswerApiClient(config)
             
         # 使用新的Verilog-A评分客户端
-<<<<<<< HEAD
-        self.grading_client = VerilogAGradingClient(config)
-=======
         self.grading_client = VerilogAComparator(config)
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
         self.grading_client.prompts = self.prompts
         
         # 初始化统计数据结构 - 适配Verilog-A评估
@@ -39,17 +32,12 @@ class VerilogAEvaluator:
             "failed_samples": 0,
             "scores_by_prompt": {},
             "errors": [],
-<<<<<<< HEAD
-            # Verilog-A特定的累积指标
-            "verilog_a_metrics": {
-=======
             "llm_time": 0.0,
             "grade_time": 0.0,
             # Verilog-A特定的累积指标
             "verilog_a_metrics": {
                 "total_component_mapping_score": 0.0,
                 "total_port_mapping_score": 0.0,
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
                 "total_component_score": 0.0,
                 "total_connection_score": 0.0,
                 "total_score": 0.0,
@@ -86,8 +74,6 @@ class VerilogAEvaluator:
                 return json.load(f)
         except Exception as e:
             raise Exception(f"Failed to load prompts: {str(e)}")
-<<<<<<< HEAD
-=======
         
 
     def _load_json(self) -> List[Dict[str, Any]]:
@@ -99,22 +85,11 @@ class VerilogAEvaluator:
         except Exception as e:
             raise Exception(f"Failed to load JSON data: {str(e)}")
         return data
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
     
     def _load_jsonl(self) -> List[Dict[str, Any]]:
         """Load JSONL data"""
         data = []
         try:
-<<<<<<< HEAD
-            with open(self.config.jsonl_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if line.strip():
-                        data.append(json.loads(line))
-            
-            if self.config.eval_samples > 0:
-                return data[:self.config.eval_samples]
-            return data
-=======
             if os.path.splitext(self.config.jsonl_path)[1] == '.json':
                 return self._load_json()
             elif os.path.splitext(self.config.jsonl_path)[1] == '.jsonl':
@@ -126,7 +101,6 @@ class VerilogAEvaluator:
                 if self.config.eval_samples > 0:
                     return data[:self.config.eval_samples]
                 return data
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
         except Exception as e:
             raise Exception(f"Failed to load JSONL data: {str(e)}")
 
@@ -264,11 +238,8 @@ class VerilogAEvaluator:
                     connection_analysis = verilog_a_analysis.get("connection_analysis", {})
                     
                     # 累积分数
-<<<<<<< HEAD
-=======
                     self.results_stats["verilog_a_metrics"]["total_component_mapping_score"] += scoring.get("module_mapping_score", 0)
                     self.results_stats["verilog_a_metrics"]["total_port_mapping_score"] += scoring.get("port_mapping_score", 0)
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
                     self.results_stats["verilog_a_metrics"]["total_component_score"] += scoring.get("component_score", 0)
                     self.results_stats["verilog_a_metrics"]["total_connection_score"] += scoring.get("connection_score", 0)
                     self.results_stats["verilog_a_metrics"]["total_score"] += scoring.get("total_score", 0)
@@ -376,11 +347,8 @@ class VerilogAEvaluator:
         # Update sample statistics after all runs
         if has_successful_run:
             self.results_stats["successful_samples"] += 1
-<<<<<<< HEAD
-=======
             self.results_stats["llm_time"] += llm_time
             self.results_stats["grade_time"] += grade_time
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
         else:
             self.results_stats["failed_samples"] += 1
         
@@ -459,19 +427,6 @@ class VerilogAEvaluator:
             verilog_metrics = self.results_stats["verilog_a_metrics"]
             
             avg_total_score = verilog_metrics["total_score"] / successful_count
-<<<<<<< HEAD
-            avg_comp_score = verilog_metrics["total_component_score"] / successful_count
-            avg_conn_score = verilog_metrics["total_connection_score"] / successful_count
-            
-            # 计算其他统计信息
-            elapsed = time.time() - stats["start_time"]
-            samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
-            
-            progress_desc = (
-                f"Completed: {stats['total_samples']} | "
-                f"Total: {avg_total_score:.1f}/100 | Comp: {avg_comp_score:.1f}/50 | "
-                f"Conn: {avg_conn_score:.1f}/50 | {samples_per_second:.2f}/s"
-=======
             avg_node_comp_score = verilog_metrics["total_component_mapping_score"] / successful_count
             avg_port_comp_score = verilog_metrics["total_port_mapping_score"] / successful_count
             avg_comp_score = verilog_metrics["total_component_score"] / successful_count
@@ -493,7 +448,6 @@ class VerilogAEvaluator:
                 f"Port Comp: {avg_port_comp_score:.1f}/100 | "
                 f"Comp: {avg_comp_score:.1f}/100 | "
                 f"Conn: {avg_conn_score:.1f}/100 | {samples_per_second:.2f}/s"
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
             )
             progress_bar.set_description(progress_desc)
         else:
@@ -708,21 +662,13 @@ class VerilogAEvaluator:
                 avg_total_score = verilog_metrics["total_score"] / successful_count
                 
                 print("Component Analysis:")
-<<<<<<< HEAD
-                print(f"  Average Score: {avg_comp_score:.2f}/50")
-=======
                 print(f"  Average Score: {avg_comp_score:.2f}/100")
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
                 print(f"  Total Correct Components: {verilog_metrics['total_correct_components']}")
                 print(f"  Total Generated Components: {verilog_metrics['total_generated_components']}")
                 print(f"  Total Reference Components: {verilog_metrics['total_reference_components']}")
                 
                 print("\nConnection Analysis:")
-<<<<<<< HEAD
-                print(f"  Average Score: {avg_conn_score:.2f}/50")
-=======
                 print(f"  Average Score: {avg_conn_score:.2f}/100")
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
                 print(f"  Total Correct Connections: {verilog_metrics['total_correct_connections']}")
                 print(f"  Total Generated Connections: {verilog_metrics['total_generated_connections']}")
                 print(f"  Total Reference Connections: {verilog_metrics['total_reference_connections']}")

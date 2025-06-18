@@ -2,12 +2,6 @@
 __pycache__/
 *.py[cod]
 *$py.class
-<<<<<<< HEAD
-
-benchmark
-command.txt
-benchmark_output
-=======
 .cache/
 
 benchmark
@@ -15,4 +9,3 @@ command.txt
 benchmark_output
 
 run.sh
->>>>>>> e434e0b... Latest version of feature/va-eval-opt
