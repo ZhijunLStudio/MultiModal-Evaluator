@@ -32,8 +32,12 @@ class VerilogAEvaluator:
             "failed_samples": 0,
             "scores_by_prompt": {},
             "errors": [],
+            "llm_time": 0.0,
+            "grade_time": 0.0,
             # Verilog-A特定的累积指标
             "verilog_a_metrics": {
+                "total_component_mapping_score": 0.0,
+                "total_port_mapping_score": 0.0,
                 "total_component_score": 0.0,
                 "total_connection_score": 0.0,
                 "total_score": 0.0,
@@ -234,6 +238,8 @@ class VerilogAEvaluator:
                     connection_analysis = verilog_a_analysis.get("connection_analysis", {})
                     
                     # 累积分数
+                    self.results_stats["verilog_a_metrics"]["total_component_mapping_score"] += scoring.get("module_mapping_score", 0)
+                    self.results_stats["verilog_a_metrics"]["total_port_mapping_score"] += scoring.get("port_mapping_score", 0)
                     self.results_stats["verilog_a_metrics"]["total_component_score"] += scoring.get("component_score", 0)
                     self.results_stats["verilog_a_metrics"]["total_connection_score"] += scoring.get("connection_score", 0)
                     self.results_stats["verilog_a_metrics"]["total_score"] += scoring.get("total_score", 0)
@@ -341,6 +347,8 @@ class VerilogAEvaluator:
         # Update sample statistics after all runs
         if has_successful_run:
             self.results_stats["successful_samples"] += 1
+            self.results_stats["llm_time"] += llm_time
+            self.results_stats["grade_time"] += grade_time
         else:
             self.results_stats["failed_samples"] += 1
         
@@ -419,17 +427,27 @@ class VerilogAEvaluator:
             verilog_metrics = self.results_stats["verilog_a_metrics"]
             
             avg_total_score = verilog_metrics["total_score"] / successful_count
+            avg_node_comp_score = verilog_metrics["total_component_mapping_score"] / successful_count
+            avg_port_comp_score = verilog_metrics["total_port_mapping_score"] / successful_count
             avg_comp_score = verilog_metrics["total_component_score"] / successful_count
             avg_conn_score = verilog_metrics["total_connection_score"] / successful_count
-            
+
+            # 计算llm和grade的平均时间
+            avg_llm_time = self.results_stats["llm_time"] / successful_count
+            avg_grade_time = self.results_stats["grade_time"] / successful_count
+
             # 计算其他统计信息
             elapsed = time.time() - stats["start_time"]
-            samples_per_second = stats["total_samples"] / elapsed if elapsed > 0 else 0
+            samples_per_second =  elapsed / stats["total_samples"]  if  stats["total_samples"] > 0 else 0
             
             progress_desc = (
+                f'llm_time: {avg_llm_time:4.2f} | grade_time: {avg_grade_time:4.2f} |'
                 f"Completed: {stats['total_samples']} | "
-                f"Total: {avg_total_score:.1f}/100 | Comp: {avg_comp_score:.1f}/50 | "
-                f"Conn: {avg_conn_score:.1f}/50 | {samples_per_second:.2f}/s"
+                f"Total: {avg_total_score:.1f}/100 | "
+                f"Node Comp: {avg_node_comp_score:.1f}/100 | "
+                f"Port Comp: {avg_port_comp_score:.1f}/100 | "
+                f"Comp: {avg_comp_score:.1f}/100 | "
+                f"Conn: {avg_conn_score:.1f}/100 | {samples_per_second:.2f}/s"
             )
             progress_bar.set_description(progress_desc)
         else:
@@ -644,13 +662,13 @@ class VerilogAEvaluator:
                 avg_total_score = verilog_metrics["total_score"] / successful_count
                 
                 print("Component Analysis:")
-                print(f"  Average Score: {avg_comp_score:.2f}/50")
+                print(f"  Average Score: {avg_comp_score:.2f}/100")
                 print(f"  Total Correct Components: {verilog_metrics['total_correct_components']}")
                 print(f"  Total Generated Components: {verilog_metrics['total_generated_components']}")
                 print(f"  Total Reference Components: {verilog_metrics['total_reference_components']}")
                 
                 print("\nConnection Analysis:")
-                print(f"  Average Score: {avg_conn_score:.2f}/50")
+                print(f"  Average Score: {avg_conn_score:.2f}/100")
                 print(f"  Total Correct Connections: {verilog_metrics['total_correct_connections']}")
                 print(f"  Total Generated Connections: {verilog_metrics['total_generated_connections']}")
                 print(f"  Total Reference Connections: {verilog_metrics['total_reference_connections']}")

@@ -9,6 +9,7 @@ import aiohttp
 from typing import Dict, Any, List, Tuple, Optional
 import time 
 from src.config import Config
+import asyncio
 
 # --- Configuration ---
 # JSON_DIR should point to the directory containing your label data in JSON format
@@ -232,18 +233,44 @@ class VerilogAParser:
 class LLMHelper:
     """Handles interaction with the OpenAI API for semantic mapping."""
 
-    def __init__(self,base_url=None, api_key=None, model="o4-mini"):
+    def __init__(self,base_url=None, api_key=None, model="o4-mini",session=None,config=None):
 
         if not api_key:
             raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable.")
         self.client = OpenAI(api_key=api_key,base_url=base_url)
         self.model = model
+        self.api_key = api_key
+        self.session = session
+        self.config = config
+        self.base_url = base_url
 
-    def _query_openai(self, prompt_text, system_message="You are an expert in Verilog-A and circuit design."):
+
+    async def _query_openai(self, prompt_text, system_message="You are an expert in Verilog-A and circuit design."):
         """Private method to send a query to OpenAI and get a JSON response."""
         # print(f"\n--- Sending Query to OpenAI ({self.model}) ---")
         # print(f"System: {system_message}")
         # print(f"User Prompt (first 200 chars): {prompt_text[:200]}...")
+
+        if self.session:
+            result = await self.generate(self.session,prompt_text)
+            if "error" in result:
+                print(f"Error in generate: {result['error']}")
+                return {}
+            content = result.get("content", "")
+            # print(f"--- OpenAI Response (Raw) ---\n{content}\n-----------------------------")
+            if "```json" in content:
+                content = re.sub(r'```json\n|\n```', '', content)
+            else:
+                content = content
+            try:
+                content = json.loads(content)
+                # print(f"--- OpenAI Response (Parsed) ---\n{content}\n-----------------------------")
+                return content
+            except json.JSONDecodeError as e:
+                print(f"Error parsing JSON from content: {e}")
+                print(f"Content: {content}")
+                return {}
+        
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -269,7 +296,86 @@ class LLMHelper:
             print(f"Error querying OpenAI or parsing JSON response: {e}")
             return {} # Return empty dict on error
 
-    def map_module_names(self, label_signatures, llm_signatures, label_top_module, llm_top_module):
+    async def generate(self, session:aiohttp.ClientSession, prompt: str, image_base64: str=None) -> Dict[str, Any]:
+        """Generate a response from the OpenAI API."""
+        """Generate response from answer API"""
+        start_time = time.time()
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+        if image_base64:
+            messages = [
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_base64, "detail": "high"}}
+                ]}
+            ]
+        else:
+            messages = [
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                ]}
+            ]
+        
+        # 准备基础参数
+        data = {
+            "model": self.model,
+            "messages": messages,
+        }
+        
+        
+        # 添加可选生成参数 - 仅添加终端指定的参数
+        if hasattr(self.config, 'answer_temperature') and self.config.answer_temperature is not None:
+            data["temperature"] = self.config.answer_temperature
+        if hasattr(self.config, 'answer_max_tokens') and self.config.answer_max_tokens is not None:
+            data["max_tokens"] = self.config.answer_max_tokens
+        if hasattr(self.config, 'answer_top_k') and self.config.answer_top_k is not None:
+            data["top_k"] = self.config.answer_top_k
+
+        if "o4-mini" not in self.model and "o3" not in self.model:
+            if hasattr(self.config, 'answer_top_p') and self.config.answer_top_p is not None:
+                data["top_p"] = self.config.answer_top_p
+        
+        try:
+            async with session.post(f"{self.base_url}/chat/completions", 
+                                    headers=headers, 
+                                    json=data,
+                                    timeout=600) as response:
+                
+                response_status = response.status
+                if response_status != 200:
+                    error_text = await response.text()
+                    print(f"API Error: Status {response_status}")
+                    print(f"Error details: {error_text}")
+                    return {"error": f"API Error: {response_status}", "content": "", "usage": {}, "latency": time.time() - start_time}
+                    
+                try:
+                    response_json = await response.json()
+                    end_time = time.time()
+                    response_time = end_time - start_time
+                    
+                    if "choices" in response_json and len(response_json["choices"]) > 0:
+                        result = {
+                            "content": response_json["choices"][0]["message"]["content"],
+                            "usage": response_json.get("usage", {}),
+                            "latency": response_time
+                        }
+                        return result
+                    else:
+                        print(f"Invalid response structure: {response_json}")
+                        return {"error": "Invalid API response structure", "content": "", "usage": {}, "latency": end_time - start_time}
+                except Exception as e:
+                    response_text = await response.text()
+                    print(f"Failed to parse API response: {e}")
+                    print(f"Raw response: {response_text}")
+                    return {"error": f"Failed to parse API response: {str(e)}", "content": "", "usage": {}, "latency": time.time() - start_time}
+        except Exception as e:
+            print(f"verilog-a grading API request error: {str(e)}")
+            return {"error": str(e), "content": "", "usage": {}, "latency": time.time() - start_time}
+
+    async def map_module_names(self, label_signatures, llm_signatures, label_top_module, llm_top_module):
         """Maps module names between label and LLM outputs using OpenAI."""
         prompt = f"""
             Analyze the following two sets of Verilog-A module signatures.
@@ -287,10 +393,10 @@ class LLMHelper:
             Example: {{ "Adder_1": "Summer_1", "{label_top_module}": "{llm_top_module}"}}
             If a label module has no clear match, do not include it in the JSON.
             """
-        print("map_module_names prompt:",prompt)
-        return self._query_openai(prompt)
+        # print("map_module_names prompt:",prompt)
+        return await self._query_openai(prompt)
 
-    def map_port_names(self, label_module_name, label_ports, llm_module_name, llm_ports):
+    async def map_port_names(self, label_module_name, label_ports, llm_module_name, llm_ports):
         """Maps port names for a given pair of modules using OpenAI."""
         prompt = f"""
                 Given two Verilog-A modules:
@@ -312,7 +418,7 @@ class LLMHelper:
                 Example: {{ "VIN": "vin", "Verr": "vs" }}
                 If a label port has no clear match, do not include it in the JSON.
                 """
-        return self._query_openai(prompt)
+        return await self._query_openai(prompt)
 
 class VerilogAComparator:
     """Compares two Verilog-A codes (label and LLM output) for modules and connections."""
@@ -327,8 +433,8 @@ class VerilogAComparator:
             self.llm_helper = LLMHelper(
                 base_url=config.grading_api_base,
                 api_key=config.grading_api_key,
-                model=config.grading_model
-            )
+                model=config.grading_model,
+                config=config)
         else:
             self.llm_helper = llm_helper
         self.prompt =""
@@ -558,7 +664,7 @@ class VerilogAComparator:
 
     
 
-    def run_comparison(self, label_code_str, llm_code_str):
+    async def run_comparison(self, label_code_str, llm_code_str):
         """Orchestrates the full comparison process."""
         results = {
             "score": 0,  # 连接映射字典
@@ -627,9 +733,9 @@ class VerilogAComparator:
                 )
 
         # 获取模块映射结果
-        module_mappings = self.llm_helper.map_module_names(label_module_sigs, llm_module_sigs, label_top, llm_top)
+        module_mappings = await self.llm_helper.map_module_names(label_module_sigs, llm_module_sigs, label_top, llm_top)
 
-        print(module_mappings)
+        # print(module_mappings)
         results["module_mappings"] = module_mappings
         results["total_correct_components"] = module_mappings
         results["total_generated_components"] = list(label_module_sigs.keys())
@@ -664,13 +770,13 @@ class VerilogAComparator:
             label_port_count = label_port_count + len(label_ports['inputs']) + len(label_ports['outputs']) + len(label_ports['inouts'])
             llm_port_count = llm_port_count + len(llm_ports['inputs']) + len(llm_ports['outputs']) + len(llm_ports['inouts'])
             if label_ports and llm_ports:
-                port_mappings[label_mod_name] = self.llm_helper.map_port_names(
+                port_mappings[label_mod_name] = await self.llm_helper.map_port_names(
                     label_mod_name, label_ports, llm_mod_name, llm_ports
                 )
                 match_port_count = match_port_count + len(port_mappings[label_mod_name])
-        port_match_tp = match_port_count / label_port_count
-        port_match_fp = (llm_port_count - match_port_count) / llm_port_count
-        port_match_fn = (label_port_count - match_port_count) / label_port_count
+        port_match_tp = match_port_count / label_port_count if label_port_count > 0 else 0
+        port_match_fp = (llm_port_count - match_port_count) / llm_port_count if llm_port_count > 0 else 0
+        port_match_fn = (label_port_count - match_port_count) / label_port_count if label_port_count > 0 else 0
         results = self.get_port_score(results,port_match_tp,port_match_fp,port_match_fn)
         results["port_mappings"] = port_mappings
 
@@ -710,14 +816,16 @@ class VerilogAComparator:
     def calculate_scores(self, result) -> Dict[str, float]:
         """Calculate component and connection scores with partial credit"""
         total_score = result["module_metrics"]["f1"]/3 + result["port_metrics"]["f1"]/3 + result["connection_metrics"]["f1"]/3
+        module_mapping_score = result["module_mappings_metrics"]["f1"]
         component_score = result["module_metrics"]["f1"]
         port_score = result["port_metrics"]["f1"]
         connection_score = result["connection_metrics"]["f1"]
         return {
+            "total_score": round(total_score*100, 1),
+            "module_mapping_score": round(module_mapping_score*100, 1),
+            "port_mapping_score": round(port_score*100, 1),
             "component_score": round(component_score*100, 1),
-            "port_score": round(port_score*100, 1),
-            "connection_score": round(connection_score*100, 1),
-            "total_score": round(total_score*100, 1)
+            "connection_score": round(connection_score*100, 1)
         }
     
     def format_results(self,results):
@@ -726,16 +834,19 @@ class VerilogAComparator:
 
     async def grade(self,session:aiohttp.ClientSession, prompt: str, llm_code_str: str, label_code_str: str):
         start_time = time.time()
+        results = {}
+        self.llm_helper.session = session
         try:
-            results = self.run_comparison(label_code_str, llm_code_str)
+            results = await self.run_comparison(label_code_str, llm_code_str)
             final_score = results['scoring']['total_score']
         except Exception as e:
+            print(traceback.format_exc())
             return {
                 "score": 0,
                 "content": '',
                 "usage": {},
                 "latency": round(time.time() - start_time, 2),
-                "verilog_a_analysis": {},
+                "verilog_a_analysis": results,
                 "error": str(traceback.format_exc())
             }
         return {
@@ -843,41 +954,43 @@ if __name__ == "__main__":
         test_list = ["2622_block_circuit_train_15k_0321_001159.jpg"]
         # test_list = ["12980_2061_block_circuit_train_15k_0321_001118.jpg"]
         test_list = ["1208_block_circuit_train_15k_0321_000859.jpg"]
-        # 处理每个结果
-        count = 0
-        for image_name, llm_info in llm_result.items():
-            if image_name not in test_list:
-                # print(f"{image_name} not in test_list.")
-                continue 
-            json_path = f"{results_dir}/{image_name}.json"
+        
+        async def process_results():
+            # 处理每个结果
+            count = 0
+            for image_name, llm_info in llm_result.items():
+                if image_name not in test_list:
+                    # print(f"{image_name} not in test_list.")
+                    continue 
+                json_path = f"{results_dir}/{image_name}.json"
 
-            # if os.path.exists(json_path):
-            #     continue
-            try:
-                count+=1
-                if count>20:
-                    continue
-                print(f"图片路径: {image_name}")
-                if image_name not in benchmark:
-                    print(f"{image_name} not in benchmark.")
-                results = comparator.run_comparison(benchmark[image_name]['answer'],llm_info['answer'])
+                # if os.path.exists(json_path):
+                #     continue
+                try:
+                    count+=1
+                    if count>20:
+                        continue
+                    print(f"图片路径: {image_name}")
+                    if image_name not in benchmark:
+                        print(f"{image_name} not in benchmark.")
+                    results = await comparator.run_comparison(benchmark[image_name]['answer'],llm_info['answer'])
 
-                # 保存JSON结果
-                with open(json_path, "w", encoding="utf-8") as f:
-                    json.dump(results, f, ensure_ascii=False, indent=4)
+                    # 保存JSON结果
+                    with open(json_path, "w", encoding="utf-8") as f:
+                        json.dump(results, f, ensure_ascii=False, indent=4)
 
-                # print(results)
-                
-                # 生成并保存HTML报告
-                html_content = generate_html_report(results, image_name)
-                with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
-                    f.write(html_content)
-            except Exception as e:
-                print(traceback.format_exc())
-                print(e)
+                    # print(results)
+                    
+                    # 生成并保存HTML报告
+                    html_content = generate_html_report(results, image_name)
+                    with open(f"{results_dir}/{image_name}.html", "w", encoding="utf-8") as f:
+                        f.write(html_content)
+                except Exception as e:
+                    print(traceback.format_exc())
+                    print(e)
+        
+        # 运行异步函数
+        asyncio.run(process_results())
             
     except Exception as e:
         print(traceback.format_exc())
-        print(e)
-
-        print(e)
