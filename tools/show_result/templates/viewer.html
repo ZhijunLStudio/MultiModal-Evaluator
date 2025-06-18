@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>查看文件 - {{ current_file }}</title>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+        }
+        .header {
+            background-color: #333;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 1.2em;
+        }
+        .nav-buttons {
+            display: flex;
+            gap: 10px;
+        }
+        .nav-button {
+            padding: 8px 15px;
+            background-color: #007bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+        }
+        .nav-button:hover {
+            background-color: #0056b3;
+        }
+        .nav-button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .content {
+            padding: 20px;
+            max-width: 1800px;
+            margin: 0 auto;
+        }
+        .back-link {
+            color: white;
+            text-decoration: none;
+            margin-right: 20px;
+        }
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <a href="{{ url_for('index') }}" class="back-link">← 返回列表</a>
+            <h1>{{ current_file }}</h1>
+        </div>
+        <div class="nav-buttons">
+            {% if prev_file %}
+                <a href="{{ url_for('view_file', filename=prev_file) }}" class="nav-button">上一个</a>
+            {% else %}
+                <button class="nav-button" disabled>上一个</button>
+            {% endif %}
+            
+            {% if next_file %}
+                <a href="{{ url_for('view_file', filename=next_file) }}" class="nav-button">下一个</a>
+            {% else %}
+                <button class="nav-button" disabled>下一个</button>
+            {% endif %}
+        </div>
+    </div>
+    
+    <div class="content">
+        {{ content|safe }}
+    </div>
+</body>
+</html> 
