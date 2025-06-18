@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>HTML文件浏览器</title>
+    <meta charset="UTF-8">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .search-box {
+            margin-bottom: 20px;
+        }
+        .search-box input {
+            padding: 8px;
+            width: 300px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .search-box button {
+            padding: 8px 15px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .search-box button:hover {
+            background-color: #0056b3;
+        }
+        .file-list {
+            list-style: none;
+            padding: 0;
+        }
+        .file-item {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .file-item:hover {
+            background-color: #f8f9fa;
+        }
+        .file-number {
+            color: #666;
+            margin-right: 10px;
+        }
+        .file-name {
+            flex-grow: 1;
+        }
+        .view-link {
+            color: #007bff;
+            text-decoration: none;
+        }
+        .view-link:hover {
+            text-decoration: underline;
+        }
+        .no-results {
+            color: #666;
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>HTML文件浏览器</h1>
+        
+        <div class="search-box">
+            <form action="{{ url_for('search') }}" method="get">
+                <input type="text" name="query" placeholder="搜索文件名或序号..." value="{{ search_query if search_query else '' }}">
+                <button type="submit">搜索</button>
+            </form>
+        </div>
+
+        {% if files %}
+            <ul class="file-list">
+                {% for file in files %}
+                    <li class="file-item">
+                        <span class="file-number">#{{ file.number }}</span>
+                        <span class="file-name">{{ file.name }}</span>
+                        <a href="{{ url_for('view_file', filename=file.name) }}" class="view-link">查看</a>
+                    </li>
+                {% endfor %}
+            </ul>
+        {% else %}
+            <div class="no-results">
+                {% if search_query %}
+                    没有找到匹配的文件
+                {% else %}
+                    没有可用的HTML文件
+                {% endif %}
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html> 

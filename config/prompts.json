@@ -1,0 +1,10 @@
+{
+  "prompt4": "Please extract and structure all connection relationships from this diagram. Begin with 'maingraph' and list all connections using the appropriate symbols:\n- -> for directed connections\n- -- for undirected connections\n- <-> for bidirectional connections\n\nIf a connection has a label, represent it as: Component1 -> Component2[\"label\"=\"label_text\"]",
+  
+  "prompt5": "Document this diagram's connectivity using the standard format.",
+
+  "prompt6": "Transform this electrical circuit into Verilog-A hardware description.",
+
+  "verilog_a_grading_prompt": "You are evaluating a Verilog-A implementation against a reference design. Please analyze the following:\n\nReference Code:\n{reference_answer}\n\nGenerated Code:\n{generated_answer}\n\nProvide a structured evaluation focusing on:\n\n1. **Module Structure**: Are the required modules present? Do they have appropriate ports?\n2. **Instantiation & Connections**: Are modules properly instantiated and connected?\n3. **Verilog-A Best Practices**: Proper use of analog blocks, electrical disciplines, etc.\n4. **Functional Correctness**: Does the implementation match the intended behavior?\n\nProvide your assessment in 3-4 sentences, highlighting what works well and what could be improved."
+
+}
