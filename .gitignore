@@ -2,7 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.cache/
 
 benchmark
 command.txt
 benchmark_output
+
+run.sh
